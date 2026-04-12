@@ -3,20 +3,11 @@ const manifestUrl =
 
 const state = {
   manifest: null,
-  pageIndex: 0,
   annotations: new Map(),
-  activeCharacterId: null,
+  activeCharacterKey: null,
 };
 
-const elements = {
-  pageImage: document.querySelector("#pageImage"),
-  overlay: document.querySelector("#overlay"),
-  prevPage: document.querySelector("#prevPage"),
-  nextPage: document.querySelector("#nextPage"),
-  pageLabel: document.querySelector("#pageLabel"),
-  wordPanel: document.querySelector("#wordPanel"),
-  sentencePanel: document.querySelector("#sentencePanel"),
-};
+let elements;
 
 async function loadJson(url) {
   const response = await fetch(url);
@@ -44,25 +35,12 @@ function renderEmptyPanels() {
   elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Click a character hotspot.</p>`;
 }
 
-function getCurrentPage() {
-  return state.manifest.pages[state.pageIndex];
-}
-
 function imagePath(relativePath) {
   return `../${relativePath}`;
 }
 
-async function loadPage(index) {
-  state.pageIndex = index;
-  state.activeCharacterId = null;
-  renderEmptyPanels();
-
-  const page = getCurrentPage();
-  elements.pageLabel.textContent = `Page ${index + 1} / ${state.manifest.pageCount}`;
-  elements.prevPage.disabled = index === 0;
-  elements.nextPage.disabled = index === state.manifest.pageCount - 1;
-
-  if (!state.annotations.has(page.id)) {
+async function loadAnnotations() {
+  const annotationPromises = state.manifest.pages.map(async (page) => {
     const annotation =
       (await loadJson(imagePath(page.annotation))) ?? {
         sourceImage: page.image,
@@ -71,27 +49,86 @@ async function loadPage(index) {
         sentences: [],
       };
     state.annotations.set(page.id, annotation);
-  }
-
-  elements.pageImage.src = imagePath(page.image);
-  await elements.pageImage.decode();
-  renderOverlay();
+  });
+  await Promise.all(annotationPromises);
 }
 
-function renderOverlay() {
-  const page = getCurrentPage();
-  const annotation = state.annotations.get(page.id);
-  elements.overlay.innerHTML = "";
+function renderChapterPanel() {
+  elements.chapterPanel.innerHTML = panelMarkup("Chapter", [
+    { label: "Series", value: state.manifest.series },
+    { label: "Chapter", value: state.manifest.chapter },
+    { label: "Segments", value: String(state.manifest.pageCount) },
+  ]);
+}
 
+function renderNoOcrState() {
+  elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">No OCR annotations are loaded yet for this chapter.</p>`;
+  elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Sentence annotations will appear here after OCR succeeds.</p>`;
+}
+
+function characterKey(pageId, characterId) {
+  return `${pageId}:${characterId}`;
+}
+
+function renderActiveCharacter() {
+  for (const hotspot of elements.chapterStack.querySelectorAll(".hotspot")) {
+    hotspot.classList.toggle("active", hotspot.dataset.characterKey === state.activeCharacterKey);
+  }
+}
+
+function updateWordPanel(word) {
+  if (!word) {
+    return;
+  }
+  elements.wordPanel.innerHTML = panelMarkup("Word", [
+    { label: "Chinese", value: word.text },
+    { label: "Pinyin", value: word.pinyin },
+    { label: "English", value: word.translation ?? "Pending" },
+  ]);
+}
+
+function updateSentencePanel(sentence) {
+  if (!sentence) {
+    return;
+  }
+  elements.sentencePanel.innerHTML = panelMarkup("Sentence", [
+    { label: "Chinese", value: sentence.text },
+    { label: "Pinyin", value: sentence.pinyin },
+    { label: "English", value: sentence.translation ?? "Pending" },
+  ]);
+}
+
+function buildPageFrame(page, index) {
+  if (!state.annotations.has(page.id)) {
+    return null;
+  }
+
+  const annotation = state.annotations.get(page.id);
   const wordById = new Map(annotation.words.map((word) => [word.id, word]));
   const sentenceById = new Map(
     annotation.sentences.map((sentence) => [sentence.id, sentence]),
   );
 
-  if (annotation.characters.length === 0) {
-    elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">No OCR annotations yet for this page.</p>`;
-    elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Sentence annotations will appear here after OCR succeeds.</p>`;
-  }
+  const frame = document.createElement("section");
+  frame.className = "page-frame";
+
+  const header = document.createElement("div");
+  header.className = "page-header";
+  header.innerHTML = `
+    <p class="page-title">Segment ${index + 1}</p>
+    <span class="page-meta">${page.id}</span>
+  `;
+
+  const canvas = document.createElement("div");
+  canvas.className = "page-canvas";
+
+  const image = document.createElement("img");
+  image.className = "page-image";
+  image.alt = `Chapter segment ${index + 1}`;
+  image.src = imagePath(page.image);
+
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
 
   for (const character of annotation.characters) {
     const hotspot = document.createElement("button");
@@ -102,53 +139,70 @@ function renderOverlay() {
     hotspot.style.width = `${character.box.width * 100}%`;
     hotspot.style.height = `${character.box.height * 100}%`;
     hotspot.title = character.text;
-    hotspot.dataset.characterId = character.id;
+    hotspot.dataset.characterKey = characterKey(page.id, character.id);
 
     hotspot.addEventListener("mouseenter", () => {
-      const word = wordById.get(character.wordId);
-      if (!word) {
-        return;
-      }
-      elements.wordPanel.innerHTML = panelMarkup("Word", [
-        { label: "Chinese", value: word.text },
-        { label: "Pinyin", value: word.pinyin },
-        { label: "English", value: word.translation ?? "Pending" },
-      ]);
+      updateWordPanel(wordById.get(character.wordId));
     });
 
     hotspot.addEventListener("click", () => {
-      state.activeCharacterId = character.id;
-      const sentence = sentenceById.get(character.sentenceId);
-      if (!sentence) {
-        return;
-      }
-      elements.sentencePanel.innerHTML = panelMarkup("Sentence", [
-        { label: "Chinese", value: sentence.text },
-        { label: "Pinyin", value: sentence.pinyin },
-        { label: "English", value: sentence.translation ?? "Pending" },
-      ]);
+      state.activeCharacterKey = characterKey(page.id, character.id);
+      updateSentencePanel(sentenceById.get(character.sentenceId));
       renderActiveCharacter();
     });
 
-    if (state.activeCharacterId === character.id) {
+    if (state.activeCharacterKey === characterKey(page.id, character.id)) {
       hotspot.classList.add("active");
     }
 
-    elements.overlay.appendChild(hotspot);
+    overlay.appendChild(hotspot);
   }
+
+  canvas.append(image, overlay);
+  frame.append(header, canvas);
+  return frame;
 }
 
-function renderActiveCharacter() {
-  for (const hotspot of elements.overlay.querySelectorAll(".hotspot")) {
-    hotspot.classList.toggle("active", hotspot.dataset.characterId === state.activeCharacterId);
+function renderChapter() {
+  elements.chapterStack.innerHTML = "";
+
+  let totalCharacters = 0;
+  for (const [pageIndex, page] of state.manifest.pages.entries()) {
+    const annotation = state.annotations.get(page.id);
+    if (!annotation) {
+      continue;
+    }
+    totalCharacters += annotation.characters.length;
+    const frame = buildPageFrame(page, pageIndex);
+    if (frame) {
+      elements.chapterStack.appendChild(frame);
+    }
+  }
+
+  if (totalCharacters === 0) {
+    renderNoOcrState();
   }
 }
 
 async function init() {
+  elements = {
+    chapterPanel: document.querySelector("#chapterPanel"),
+    chapterStack: document.querySelector("#chapterStack"),
+    wordPanel: document.querySelector("#wordPanel"),
+    sentencePanel: document.querySelector("#sentencePanel"),
+  };
+
+  for (const [key, value] of Object.entries(elements)) {
+    if (!value) {
+      throw new Error(`Missing reader element: ${key}`);
+    }
+  }
+
   state.manifest = await loadJson(manifestUrl);
-  elements.prevPage.addEventListener("click", () => loadPage(state.pageIndex - 1));
-  elements.nextPage.addEventListener("click", () => loadPage(state.pageIndex + 1));
-  await loadPage(0);
+  renderEmptyPanels();
+  renderChapterPanel();
+  await loadAnnotations();
+  renderChapter();
 }
 
 init().catch((error) => {

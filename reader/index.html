@@ -12,14 +12,10 @@
         <p class="eyebrow">ChineseEreader</p>
         <h1>Chapter Reader</h1>
         <p class="lede">
-          Hover a character to inspect its segmented word. Click a character to
-          pin the containing sentence.
+          Read the whole chapter as one continuous scroll. Hover a character to
+          inspect its segmented word and click to pin the containing sentence.
         </p>
-        <div class="controls">
-          <button id="prevPage">Previous</button>
-          <span id="pageLabel">Page 1 / 1</span>
-          <button id="nextPage">Next</button>
-        </div>
+        <div class="panel" id="chapterPanel"></div>
         <div class="panel" id="wordPanel">
           <h2>Word</h2>
           <p class="empty">Hover a character hotspot.</p>
@@ -30,10 +26,7 @@
         </div>
       </aside>
       <main class="stage">
-        <div class="page-frame">
-          <img id="pageImage" alt="Comic page" />
-          <div id="overlay"></div>
-        </div>
+        <div id="chapterStack" class="chapter-stack"></div>
       </main>
     </div>
     <script type="module" src="./app.js"></script>
