@@ -87,6 +87,8 @@ Process a chapter with the current recommended horizontal trim for the Bilibili 
 python3 scripts/process_chapter.py --series renjian-bailijin --chapter chapter-001 --crop-left-ratio 0.26 --crop-right-ratio 0.26
 ```
 
+That command also keeps a small horizontal safety margin by default (`48px` on each side). You can tune it with `--horizontal-margin-px`.
+
 Serve the reader locally:
 
 ```bash

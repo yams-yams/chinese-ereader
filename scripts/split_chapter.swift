@@ -11,6 +11,7 @@ struct Config {
     let whiteThreshold: UInt8
     let cropLeftRatio: Double
     let cropRightRatio: Double
+    let horizontalMarginPx: Int
 }
 
 struct Segment {
@@ -34,7 +35,8 @@ func parseArguments() -> Config {
         minGap: Int(value(for: "--min-gap")) ?? 120,
         whiteThreshold: UInt8(Int(value(for: "--white-threshold")) ?? 245),
         cropLeftRatio: Double(value(for: "--crop-left-ratio")) ?? 0,
-        cropRightRatio: Double(value(for: "--crop-right-ratio")) ?? 0
+        cropRightRatio: Double(value(for: "--crop-right-ratio")) ?? 0,
+        horizontalMarginPx: Int(value(for: "--horizontal-margin-px")) ?? 48
     )
 }
 
@@ -177,13 +179,13 @@ func crop(_ image: CGImage, segment: Segment) -> CGImage? {
     return image.cropping(to: cropRect)
 }
 
-func cropHorizontally(_ image: CGImage, leftRatio: Double, rightRatio: Double) -> CGImage? {
+func cropHorizontally(_ image: CGImage, leftRatio: Double, rightRatio: Double, marginPx: Int) -> CGImage? {
     guard leftRatio >= 0, rightRatio >= 0, leftRatio + rightRatio < 1 else {
         return image
     }
 
-    let leftInset = Int((Double(image.width) * leftRatio).rounded())
-    let rightInset = Int((Double(image.width) * rightRatio).rounded())
+    let leftInset = max(0, Int((Double(image.width) * leftRatio).rounded()) - marginPx)
+    let rightInset = max(0, Int((Double(image.width) * rightRatio).rounded()) - marginPx)
     let cropWidth = image.width - leftInset - rightInset
 
     guard cropWidth > 0 else {
@@ -223,7 +225,8 @@ for imageURL in imageFiles(in: config.inputDir) {
     let image = cropHorizontally(
         rawImage,
         leftRatio: config.cropLeftRatio,
-        rightRatio: config.cropRightRatio
+        rightRatio: config.cropRightRatio,
+        marginPx: config.horizontalMarginPx
     ) ?? rawImage
 
     let segments = detectSegments(

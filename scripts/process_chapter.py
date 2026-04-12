@@ -81,6 +81,12 @@ def main() -> None:
         default=0.0,
         help="Fraction of image width to trim from the right before page splitting.",
     )
+    parser.add_argument(
+        "--horizontal-margin-px",
+        type=int,
+        default=48,
+        help="Pixels of horizontal margin to preserve on both sides after ratio-based trimming.",
+    )
     args = parser.parse_args()
 
     raw_dir = ROOT / "data" / "raw" / args.series / args.chapter
@@ -111,6 +117,8 @@ def main() -> None:
             str(args.crop_left_ratio),
             "--crop-right-ratio",
             str(args.crop_right_ratio),
+            "--horizontal-margin-px",
+            str(args.horizontal_margin_px),
         ]
     )
     run(
