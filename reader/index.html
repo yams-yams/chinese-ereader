@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ChineseEreader</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <p class="eyebrow">ChineseEreader</p>
+        <h1>Chapter Reader</h1>
+        <p class="lede">
+          Hover a character to inspect its segmented word. Click a character to
+          pin the containing sentence.
+        </p>
+        <div class="controls">
+          <button id="prevPage">Previous</button>
+          <span id="pageLabel">Page 1 / 1</span>
+          <button id="nextPage">Next</button>
+        </div>
+        <div class="panel" id="wordPanel">
+          <h2>Word</h2>
+          <p class="empty">Hover a character hotspot.</p>
+        </div>
+        <div class="panel" id="sentencePanel">
+          <h2>Sentence</h2>
+          <p class="empty">Click a character hotspot.</p>
+        </div>
+      </aside>
+      <main class="stage">
+        <div class="page-frame">
+          <img id="pageImage" alt="Comic page" />
+          <div id="overlay"></div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
