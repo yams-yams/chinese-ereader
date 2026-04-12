@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPLITTER = ROOT / "scripts" / "split_chapter.swift"
-OCR = ROOT / "scripts" / "ocr_pages.swift"
+OCR = ROOT / "scripts" / "ocr_pages.py"
 SWIFT_CACHE = ROOT / "tmp" / "swift-module-cache"
 
 
@@ -87,6 +87,22 @@ def main() -> None:
         default=48,
         help="Pixels of horizontal margin to preserve on both sides after ratio-based trimming.",
     )
+    parser.add_argument(
+        "--ocr-lang",
+        default="chi_sim+chi_sim_vert",
+        help="Tesseract language pack(s) used by the Python OCR stage.",
+    )
+    parser.add_argument(
+        "--ocr-psm",
+        default="11",
+        help="Tesseract page segmentation mode.",
+    )
+    parser.add_argument(
+        "--ocr-min-confidence",
+        type=float,
+        default=25.0,
+        help="Discard OCR tokens below this confidence.",
+    )
     args = parser.parse_args()
 
     raw_dir = ROOT / "data" / "raw" / args.series / args.chapter
@@ -123,14 +139,18 @@ def main() -> None:
     )
     run(
         [
-            "swift",
-            "-module-cache-path",
-            str(SWIFT_CACHE),
+            "python3",
             str(OCR),
             "--input",
             str(pages_dir),
             "--output",
             str(annotations_dir),
+            "--lang",
+            str(args.ocr_lang),
+            "--psm",
+            str(args.ocr_psm),
+            "--min-confidence",
+            str(args.ocr_min_confidence),
         ]
     )
     build_manifest(args.series, args.chapter)

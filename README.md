@@ -75,6 +75,12 @@ Once they are in place, we can build the first preprocessing script around that 
 
 ## Current local workflow
 
+Install OCR dependencies:
+
+```bash
+brew install tesseract tesseract-lang
+```
+
 Process a chapter:
 
 ```bash
@@ -105,4 +111,5 @@ Then open:
 - Horizontal trimming is supported as a preprocessing option for removing side gutters and reader UI artifacts.
 - A chapter manifest is generated for the reader.
 - The reader can navigate processed pages now.
-- OCR scaffolding is in place, but the built-in macOS Vision OCR path is currently failing in this environment, so annotation files are placeholders for the moment.
+- The reader now renders a chapter as one continuous scroll surface.
+- The OCR stage now runs through Python with Tesseract and emits real annotation JSON, though recognition quality still needs tuning for manhua text.
