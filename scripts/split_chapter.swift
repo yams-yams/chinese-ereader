@@ -166,7 +166,7 @@ func writePNG(image: CGImage, to url: URL) throws {
 func crop(_ image: CGImage, segment: Segment) -> CGImage? {
     let cropRect = CGRect(
         x: 0,
-        y: image.height - segment.endY,
+        y: segment.startY,
         width: image.width,
         height: segment.endY - segment.startY
     )
