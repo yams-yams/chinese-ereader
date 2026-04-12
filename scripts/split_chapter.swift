@@ -9,6 +9,8 @@ struct Config {
     let outputDir: URL
     let minGap: Int
     let whiteThreshold: UInt8
+    let cropLeftRatio: Double
+    let cropRightRatio: Double
 }
 
 struct Segment {
@@ -30,7 +32,9 @@ func parseArguments() -> Config {
         inputDir: URL(fileURLWithPath: value(for: "--input")),
         outputDir: URL(fileURLWithPath: value(for: "--output")),
         minGap: Int(value(for: "--min-gap")) ?? 120,
-        whiteThreshold: UInt8(Int(value(for: "--white-threshold")) ?? 245)
+        whiteThreshold: UInt8(Int(value(for: "--white-threshold")) ?? 245),
+        cropLeftRatio: Double(value(for: "--crop-left-ratio")) ?? 0,
+        cropRightRatio: Double(value(for: "--crop-right-ratio")) ?? 0
     )
 }
 
@@ -173,6 +177,23 @@ func crop(_ image: CGImage, segment: Segment) -> CGImage? {
     return image.cropping(to: cropRect)
 }
 
+func cropHorizontally(_ image: CGImage, leftRatio: Double, rightRatio: Double) -> CGImage? {
+    guard leftRatio >= 0, rightRatio >= 0, leftRatio + rightRatio < 1 else {
+        return image
+    }
+
+    let leftInset = Int((Double(image.width) * leftRatio).rounded())
+    let rightInset = Int((Double(image.width) * rightRatio).rounded())
+    let cropWidth = image.width - leftInset - rightInset
+
+    guard cropWidth > 0 else {
+        return image
+    }
+
+    let cropRect = CGRect(x: leftInset, y: 0, width: cropWidth, height: image.height)
+    return image.cropping(to: cropRect)
+}
+
 func imageFiles(in directory: URL) -> [URL] {
     let fileManager = FileManager.default
     guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil) else {
@@ -194,10 +215,16 @@ try fileManager.createDirectory(at: config.outputDir, withIntermediateDirectorie
 
 var pageIndex = 1
 for imageURL in imageFiles(in: config.inputDir) {
-    guard let image = loadCGImage(imageURL) else {
+    guard let rawImage = loadCGImage(imageURL) else {
         fputs("Failed to load \(imageURL.path)\n", stderr)
         continue
     }
+
+    let image = cropHorizontally(
+        rawImage,
+        leftRatio: config.cropLeftRatio,
+        rightRatio: config.cropRightRatio
+    ) ?? rawImage
 
     let segments = detectSegments(
         rowFractions: rowInkFractions(image: image, whiteThreshold: config.whiteThreshold),

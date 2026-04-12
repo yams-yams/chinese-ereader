@@ -17,6 +17,15 @@ def run(cmd):
     subprocess.run(cmd, check=True)
 
 
+def clear_generated_files(directory: Path, suffix: str) -> None:
+    if not directory.exists():
+        return
+
+    for path in directory.glob(f"*{suffix}"):
+        if path.is_file():
+            path.unlink()
+
+
 def build_manifest(series_slug: str, chapter_slug: str) -> None:
     pages_dir = ROOT / "data" / "processed" / "pages" / series_slug / chapter_slug
     annotations_dir = ROOT / "data" / "processed" / "annotations" / series_slug / chapter_slug
@@ -60,6 +69,18 @@ def main() -> None:
         default=245,
         help="Pixels brighter than this are considered white.",
     )
+    parser.add_argument(
+        "--crop-left-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of image width to trim from the left before page splitting.",
+    )
+    parser.add_argument(
+        "--crop-right-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of image width to trim from the right before page splitting.",
+    )
     args = parser.parse_args()
 
     raw_dir = ROOT / "data" / "raw" / args.series / args.chapter
@@ -69,6 +90,8 @@ def main() -> None:
     SWIFT_CACHE.mkdir(parents=True, exist_ok=True)
     pages_dir.mkdir(parents=True, exist_ok=True)
     annotations_dir.mkdir(parents=True, exist_ok=True)
+    clear_generated_files(pages_dir, ".png")
+    clear_generated_files(annotations_dir, ".json")
 
     run(
         [
@@ -84,6 +107,10 @@ def main() -> None:
             str(args.min_gap),
             "--white-threshold",
             str(args.white_threshold),
+            "--crop-left-ratio",
+            str(args.crop_left_ratio),
+            "--crop-right-ratio",
+            str(args.crop_right_ratio),
         ]
     )
     run(

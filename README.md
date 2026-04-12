@@ -81,6 +81,12 @@ Process a chapter:
 python3 scripts/process_chapter.py --series renjian-bailijin --chapter chapter-001
 ```
 
+Process a chapter with the current recommended horizontal trim for the Bilibili captures:
+
+```bash
+python3 scripts/process_chapter.py --series renjian-bailijin --chapter chapter-001 --crop-left-ratio 0.26 --crop-right-ratio 0.26
+```
+
 Serve the reader locally:
 
 ```bash
@@ -94,6 +100,7 @@ Then open:
 ## Current status
 
 - Chapter 1 raw captures are split into page-level images.
+- Horizontal trimming is supported as a preprocessing option for removing side gutters and reader UI artifacts.
 - A chapter manifest is generated for the reader.
 - The reader can navigate processed pages now.
 - OCR scaffolding is in place, but the built-in macOS Vision OCR path is currently failing in this environment, so annotation files are placeholders for the moment.
