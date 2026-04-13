@@ -49,6 +49,21 @@ def run_tesseract(page_path: Path, lang: str, psm: str):
     return list(csv.DictReader(result.stdout.splitlines(), delimiter="\t"))
 
 
+def run_tesseract_makebox(page_path: Path, lang: str, psm: str):
+    command = [
+        "tesseract",
+        str(page_path),
+        "stdout",
+        "-l",
+        lang,
+        "--psm",
+        psm,
+        "makebox",
+    ]
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    return result.stdout.splitlines()
+
+
 def normalize_box(left, top, width, height, page_width, page_height):
     return {
         "x": left / page_width,
@@ -58,64 +73,69 @@ def normalize_box(left, top, width, height, page_width, page_height):
     }
 
 
-def split_character_boxes(word_box, text):
-    text = text.strip()
-    if not text:
-        return []
+def parse_makebox(lines, page_width, page_height):
+    characters = []
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 6:
+            continue
 
-    length = len(text)
-    if length == 0:
-        return []
+        text = parts[0]
+        try:
+            left = int(parts[1])
+            bottom = int(parts[2])
+            right = int(parts[3])
+            top = int(parts[4])
+        except ValueError:
+            continue
 
-    x = word_box["x"]
-    y = word_box["y"]
-    width = word_box["width"]
-    height = word_box["height"]
+        width = right - left
+        height = top - bottom
+        if width <= 0 or height <= 0:
+            continue
 
-    vertical = height > width * 1.35
-    boxes = []
+        characters.append(
+            {
+                "text": text,
+                "pixelBox": {
+                    "left": left,
+                    "top": page_height - top,
+                    "width": width,
+                    "height": height,
+                },
+                "box": normalize_box(left, page_height - top, width, height, page_width, page_height),
+            }
+        )
 
-    for index, character in enumerate(text):
-        if vertical:
-            char_height = height / length
-            boxes.append(
-                {
-                    "text": character,
-                    "box": {
-                        "x": x,
-                        "y": y + (height - char_height * (index + 1)),
-                        "width": width,
-                        "height": char_height,
-                    },
-                }
-            )
-        else:
-            char_width = width / length
-            boxes.append(
-                {
-                    "text": character,
-                    "box": {
-                        "x": x + char_width * index,
-                        "y": y,
-                        "width": char_width,
-                        "height": height,
-                    },
-                }
-            )
-
-    return boxes
+    return characters
 
 
-def build_annotation(rows, source_image, min_confidence):
+def overlap_area(box_a, box_b):
+    ax1 = box_a["left"]
+    ay1 = box_a["top"]
+    ax2 = ax1 + box_a["width"]
+    ay2 = ay1 + box_a["height"]
+
+    bx1 = box_b["left"]
+    by1 = box_b["top"]
+    bx2 = bx1 + box_b["width"]
+    by2 = by1 + box_b["height"]
+
+    overlap_width = max(0, min(ax2, bx2) - max(ax1, bx1))
+    overlap_height = max(0, min(ay2, by2) - max(ay1, by1))
+    return overlap_width * overlap_height
+
+
+def build_annotation(rows, page_path, min_confidence, lang, psm):
+    source_image = page_path.name
     page_row = next((row for row in rows if row.get("level") == "1"), None)
     page_width = max(1, int(page_row["width"])) if page_row else 1
     page_height = max(1, int(page_row["height"])) if page_row else 1
 
     words = []
-    characters = []
     sentences_by_line = {}
     word_counter = 1
-    character_counter = 1
+    word_entries = []
 
     for row in rows:
         if row.get("level") != "5":
@@ -137,8 +157,6 @@ def build_annotation(rows, source_image, min_confidence):
         top = int(row["top"])
         width = int(row["width"])
         height = int(row["height"])
-        box = normalize_box(left, top, width, height, page_width, page_height)
-
         line_key = (
             row["block_num"],
             row["par_num"],
@@ -148,60 +166,93 @@ def build_annotation(rows, source_image, min_confidence):
             line_key,
             {
                 "text_parts": [],
-                "character_ids": [],
                 "word_ids": [],
             },
         )
 
         word_id = f"word-{word_counter:04d}"
         word_counter += 1
-        word_characters = []
-
-        for chunk in split_character_boxes(box, text):
-            character_id = f"char-{character_counter:04d}"
-            character_counter += 1
-            characters.append(
-                {
-                    "id": character_id,
-                    "text": chunk["text"],
-                    "box": chunk["box"],
-                    "wordId": word_id,
-                    "sentenceId": None,
-                }
-            )
-            word_characters.append(character_id)
-            sentence["character_ids"].append(character_id)
-
-        words.append(
+        word_entries.append(
             {
                 "id": word_id,
                 "text": text,
-                "pinyin": "",
-                "translation": None,
-                "characterIds": word_characters,
+                "lineKey": line_key,
+                "pixelBox": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                },
             }
         )
 
         sentence["text_parts"].append(text)
         sentence["word_ids"].append(word_id)
 
+    char_box_lines = run_tesseract_makebox(page_path, lang, psm)
+    raw_characters = parse_makebox(char_box_lines, page_width, page_height)
+
+    characters = []
+    character_counter = 1
+    words_by_id = {
+        entry["id"]: {
+            "id": entry["id"],
+            "text": entry["text"],
+            "pinyin": "",
+            "translation": None,
+            "characterIds": [],
+        }
+        for entry in word_entries
+    }
+
+    for raw_character in raw_characters:
+        best_word = None
+        best_overlap = 0
+        for word_entry in word_entries:
+            overlap = overlap_area(raw_character["pixelBox"], word_entry["pixelBox"])
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_word = word_entry
+
+        if best_word is None:
+            continue
+
+        character_id = f"char-{character_counter:04d}"
+        character_counter += 1
+        characters.append(
+            {
+                "id": character_id,
+                "text": raw_character["text"],
+                "box": raw_character["box"],
+                "wordId": best_word["id"],
+                "sentenceId": None,
+            }
+        )
+        words_by_id[best_word["id"]]["characterIds"].append(character_id)
+
     sentences = []
     for index, sentence in enumerate(sentences_by_line.values(), start=1):
         sentence_id = f"sentence-{index:04d}"
         sentence_text = "".join(sentence["text_parts"])
+        sentence_character_ids = []
+        for word_id in sentence["word_ids"]:
+            sentence_character_ids.extend(words_by_id[word_id]["characterIds"])
+
         sentences.append(
             {
                 "id": sentence_id,
                 "text": sentence_text,
                 "pinyin": "",
                 "translation": None,
-                "characterIds": sentence["character_ids"],
+                "characterIds": sentence_character_ids,
             }
         )
-        sentence_character_ids = set(sentence["character_ids"])
+        sentence_character_ids = set(sentence_character_ids)
         for character in characters:
             if character["id"] in sentence_character_ids:
                 character["sentenceId"] = sentence_id
+
+    words = list(words_by_id.values())
 
     return {
         "sourceImage": source_image,
@@ -220,7 +271,13 @@ def main():
     for page_path in iter_pages(input_dir):
         try:
             rows = run_tesseract(page_path, lang=args.lang, psm=args.psm)
-            annotation = build_annotation(rows, page_path.name, args.min_confidence)
+            annotation = build_annotation(
+                rows,
+                page_path,
+                args.min_confidence,
+                args.lang,
+                args.psm,
+            )
         except subprocess.CalledProcessError as error:
             print(f"Failed OCR for {page_path.name}: {error}", flush=True)
             annotation = {
