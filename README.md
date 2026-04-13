@@ -75,10 +75,16 @@ Once they are in place, we can build the first preprocessing script around that 
 
 ## Current local workflow
 
-Install OCR dependencies:
+Create the local Python environment:
 
 ```bash
-brew install tesseract tesseract-lang
+python3 -m venv .venv
+```
+
+Install OCR dependencies into the local environment:
+
+```bash
+.venv/bin/pip install --upgrade pip setuptools wheel paddlepaddle paddleocr opencv-python-headless
 ```
 
 Process a chapter:
@@ -94,6 +100,8 @@ python3 scripts/process_chapter.py --series renjian-bailijin --chapter chapter-0
 ```
 
 That command also keeps a small horizontal safety margin by default (`48px` on each side). You can tune it with `--horizontal-margin-px`.
+
+The first PaddleOCR run will also download model files into `tmp/paddlex-cache/`.
 
 Serve the reader locally:
 
@@ -112,4 +120,4 @@ Then open:
 - A chapter manifest is generated for the reader.
 - The reader can navigate processed pages now.
 - The reader now renders a chapter as one continuous scroll surface.
-- The OCR stage now runs through Python with Tesseract and emits real annotation JSON, though recognition quality still needs tuning for manhua text.
+- The OCR stage now runs through PaddleOCR with the PP-OCRv5 mobile models, which gives better Chinese text detection and per-character regions than the previous Tesseract path.

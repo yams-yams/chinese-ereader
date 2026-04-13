@@ -1,67 +1,55 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
 import json
-import subprocess
+import os
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
+PADDLE_CACHE = ROOT / "tmp" / "paddlex-cache"
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(PADDLE_CACHE))
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+from paddleocr import PaddleOCR
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run OCR over processed chapter pages.")
+    parser = argparse.ArgumentParser(description="Run PaddleOCR over processed chapter pages.")
     parser.add_argument("--input", required=True, help="Directory with page PNGs.")
     parser.add_argument("--output", required=True, help="Directory to write page JSON annotations.")
     parser.add_argument(
         "--lang",
-        default="chi_sim+chi_sim_vert",
-        help="Tesseract language pack(s) to use.",
-    )
-    parser.add_argument(
-        "--psm",
-        default="11",
-        help="Tesseract page segmentation mode.",
+        default="ch",
+        help="PaddleOCR language code.",
     )
     parser.add_argument(
         "--min-confidence",
         type=float,
-        default=25.0,
-        help="Discard OCR tokens below this confidence.",
+        default=0.7,
+        help="Discard OCR lines below this confidence.",
+    )
+    parser.add_argument(
+        "--text-detection-model-name",
+        default=None,
+        help="Optional PaddleOCR text detection model override.",
+    )
+    parser.add_argument(
+        "--text-recognition-model-name",
+        default=None,
+        help="Optional PaddleOCR text recognition model override.",
+    )
+    parser.add_argument(
+        "--text-det-limit-side-len",
+        type=int,
+        default=2500,
+        help="Maximum side length PaddleOCR should use before resizing.",
     )
     return parser.parse_args()
 
 
 def iter_pages(directory: Path):
     return sorted(directory.glob("page-*.png"))
-
-
-def run_tesseract(page_path: Path, lang: str, psm: str):
-    command = [
-        "tesseract",
-        str(page_path),
-        "stdout",
-        "-l",
-        lang,
-        "--psm",
-        psm,
-        "tsv",
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    return list(csv.DictReader(result.stdout.splitlines(), delimiter="\t"))
-
-
-def run_tesseract_makebox(page_path: Path, lang: str, psm: str):
-    command = [
-        "tesseract",
-        str(page_path),
-        "stdout",
-        "-l",
-        lang,
-        "--psm",
-        psm,
-        "makebox",
-    ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
-    return result.stdout.splitlines()
 
 
 def normalize_box(left, top, width, height, page_width, page_height):
@@ -73,193 +61,137 @@ def normalize_box(left, top, width, height, page_width, page_height):
     }
 
 
-def parse_makebox(lines, page_width, page_height):
+def polygon_to_box(polygon, page_width, page_height):
+    xs = [point[0] for point in polygon]
+    ys = [point[1] for point in polygon]
+    left = min(xs)
+    top = min(ys)
+    width = max(xs) - left
+    height = max(ys) - top
+    return normalize_box(left, top, width, height, page_width, page_height)
+
+
+def build_annotation(result, page_path: Path, min_confidence: float):
+    input_img = result["doc_preprocessor_res"]["output_img"]
+    page_height, page_width = input_img.shape[:2]
+
     characters = []
-    for line in lines:
-        parts = line.strip().split()
-        if len(parts) < 6:
-            continue
-
-        text = parts[0]
-        try:
-            left = int(parts[1])
-            bottom = int(parts[2])
-            right = int(parts[3])
-            top = int(parts[4])
-        except ValueError:
-            continue
-
-        width = right - left
-        height = top - bottom
-        if width <= 0 or height <= 0:
-            continue
-
-        characters.append(
-            {
-                "text": text,
-                "pixelBox": {
-                    "left": left,
-                    "top": page_height - top,
-                    "width": width,
-                    "height": height,
-                },
-                "box": normalize_box(left, page_height - top, width, height, page_width, page_height),
-            }
-        )
-
-    return characters
-
-
-def overlap_area(box_a, box_b):
-    ax1 = box_a["left"]
-    ay1 = box_a["top"]
-    ax2 = ax1 + box_a["width"]
-    ay2 = ay1 + box_a["height"]
-
-    bx1 = box_b["left"]
-    by1 = box_b["top"]
-    bx2 = bx1 + box_b["width"]
-    by2 = by1 + box_b["height"]
-
-    overlap_width = max(0, min(ax2, bx2) - max(ax1, bx1))
-    overlap_height = max(0, min(ay2, by2) - max(ay1, by1))
-    return overlap_width * overlap_height
-
-
-def build_annotation(rows, page_path, min_confidence, lang, psm):
-    source_image = page_path.name
-    page_row = next((row for row in rows if row.get("level") == "1"), None)
-    page_width = max(1, int(page_row["width"])) if page_row else 1
-    page_height = max(1, int(page_row["height"])) if page_row else 1
-
     words = []
-    sentences_by_line = {}
+    sentences = []
+    character_counter = 1
     word_counter = 1
-    word_entries = []
+    sentence_counter = 1
 
-    for row in rows:
-        if row.get("level") != "5":
-            continue
+    rec_texts = result.get("rec_texts", [])
+    rec_scores = result.get("rec_scores", [])
+    rec_polys = result.get("rec_polys", [])
+    text_words = result.get("text_word", [])
+    text_word_regions = result.get("text_word_region", [])
 
-        text = (row.get("text") or "").strip()
-        if not text:
-            continue
-
-        try:
-            confidence = float(row.get("conf", "-1"))
-        except ValueError:
-            confidence = -1
-
+    for line_index, text in enumerate(rec_texts):
+        confidence = rec_scores[line_index]
         if confidence < min_confidence:
             continue
 
-        left = int(row["left"])
-        top = int(row["top"])
-        width = int(row["width"])
-        height = int(row["height"])
-        line_key = (
-            row["block_num"],
-            row["par_num"],
-            row["line_num"],
-        )
-        sentence = sentences_by_line.setdefault(
-            line_key,
-            {
-                "text_parts": [],
-                "word_ids": [],
-            },
-        )
-
-        word_id = f"word-{word_counter:04d}"
-        word_counter += 1
-        word_entries.append(
-            {
-                "id": word_id,
-                "text": text,
-                "lineKey": line_key,
-                "pixelBox": {
-                    "left": left,
-                    "top": top,
-                    "width": width,
-                    "height": height,
-                },
-            }
-        )
-
-        sentence["text_parts"].append(text)
-        sentence["word_ids"].append(word_id)
-
-    char_box_lines = run_tesseract_makebox(page_path, lang, psm)
-    raw_characters = parse_makebox(char_box_lines, page_width, page_height)
-
-    characters = []
-    character_counter = 1
-    words_by_id = {
-        entry["id"]: {
-            "id": entry["id"],
-            "text": entry["text"],
-            "pinyin": "",
-            "translation": None,
-            "characterIds": [],
-        }
-        for entry in word_entries
-    }
-
-    for raw_character in raw_characters:
-        best_word = None
-        best_overlap = 0
-        for word_entry in word_entries:
-            overlap = overlap_area(raw_character["pixelBox"], word_entry["pixelBox"])
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_word = word_entry
-
-        if best_word is None:
-            continue
-
-        character_id = f"char-{character_counter:04d}"
-        character_counter += 1
-        characters.append(
-            {
-                "id": character_id,
-                "text": raw_character["text"],
-                "box": raw_character["box"],
-                "wordId": best_word["id"],
-                "sentenceId": None,
-            }
-        )
-        words_by_id[best_word["id"]]["characterIds"].append(character_id)
-
-    sentences = []
-    for index, sentence in enumerate(sentences_by_line.values(), start=1):
-        sentence_id = f"sentence-{index:04d}"
-        sentence_text = "".join(sentence["text_parts"])
+        sentence_id = f"sentence-{sentence_counter:04d}"
+        sentence_counter += 1
         sentence_character_ids = []
-        for word_id in sentence["word_ids"]:
-            sentence_character_ids.extend(words_by_id[word_id]["characterIds"])
+
+        word_tokens = text_words[line_index] if line_index < len(text_words) else []
+        word_regions = (
+            text_word_regions[line_index] if line_index < len(text_word_regions) else []
+        )
+
+        if word_tokens and word_regions and len(word_tokens) == len(word_regions):
+            for token, token_region in zip(word_tokens, word_regions):
+                token_text = str(token).strip()
+                if not token_text:
+                    continue
+
+                word_id = f"word-{word_counter:04d}"
+                word_counter += 1
+
+                character_id = f"char-{character_counter:04d}"
+                character_counter += 1
+                characters.append(
+                    {
+                        "id": character_id,
+                        "text": token_text,
+                        "box": polygon_to_box(token_region, page_width, page_height),
+                        "wordId": word_id,
+                        "sentenceId": sentence_id,
+                    }
+                )
+                sentence_character_ids.append(character_id)
+
+                words.append(
+                    {
+                        "id": word_id,
+                        "text": token_text,
+                        "pinyin": "",
+                        "translation": None,
+                        "characterIds": [character_id],
+                    }
+                )
+        else:
+            word_id = f"word-{word_counter:04d}"
+            word_counter += 1
+            character_id = f"char-{character_counter:04d}"
+            character_counter += 1
+
+            fallback_poly = rec_polys[line_index] if line_index < len(rec_polys) else [
+                (0, 0),
+                (page_width, 0),
+                (page_width, page_height),
+                (0, page_height),
+            ]
+
+            characters.append(
+                {
+                    "id": character_id,
+                    "text": text,
+                    "box": polygon_to_box(fallback_poly, page_width, page_height),
+                    "wordId": word_id,
+                    "sentenceId": sentence_id,
+                }
+            )
+            sentence_character_ids.append(character_id)
+            words.append(
+                {
+                    "id": word_id,
+                    "text": text,
+                    "pinyin": "",
+                    "translation": None,
+                    "characterIds": [character_id],
+                }
+            )
 
         sentences.append(
             {
                 "id": sentence_id,
-                "text": sentence_text,
+                "text": text,
                 "pinyin": "",
                 "translation": None,
                 "characterIds": sentence_character_ids,
             }
         )
-        sentence_character_ids = set(sentence_character_ids)
-        for character in characters:
-            if character["id"] in sentence_character_ids:
-                character["sentenceId"] = sentence_id
-
-    words = list(words_by_id.values())
 
     return {
-        "sourceImage": source_image,
+        "sourceImage": page_path.name,
         "characters": characters,
         "words": words,
         "sentences": sentences,
     }
+
+
+def build_ocr(args):
+    kwargs = {
+        "lang": args.lang,
+        "text_det_limit_side_len": args.text_det_limit_side_len,
+        "text_detection_model_name": args.text_detection_model_name or "PP-OCRv5_mobile_det",
+        "text_recognition_model_name": args.text_recognition_model_name or "PP-OCRv5_mobile_rec",
+    }
+    return PaddleOCR(**kwargs)
 
 
 def main():
@@ -267,18 +199,24 @@ def main():
     input_dir = Path(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+    PADDLE_CACHE.mkdir(parents=True, exist_ok=True)
+
+    ocr = build_ocr(args)
 
     for page_path in iter_pages(input_dir):
         try:
-            rows = run_tesseract(page_path, lang=args.lang, psm=args.psm)
-            annotation = build_annotation(
-                rows,
-                page_path,
-                args.min_confidence,
-                args.lang,
-                args.psm,
-            )
-        except subprocess.CalledProcessError as error:
+            print(f"OCR {page_path.name}", flush=True)
+            results = list(ocr.predict(str(page_path), return_word_box=True))
+            if results:
+                annotation = build_annotation(results[0], page_path, args.min_confidence)
+            else:
+                annotation = {
+                    "sourceImage": page_path.name,
+                    "characters": [],
+                    "words": [],
+                    "sentences": [],
+                }
+        except Exception as error:  # noqa: BLE001
             print(f"Failed OCR for {page_path.name}: {error}", flush=True)
             annotation = {
                 "sourceImage": page_path.name,

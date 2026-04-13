@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SPLITTER = ROOT / "scripts" / "split_chapter.swift"
 OCR = ROOT / "scripts" / "ocr_pages.py"
 SWIFT_CACHE = ROOT / "tmp" / "swift-module-cache"
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
 
 
 def run(cmd):
@@ -89,19 +90,30 @@ def main() -> None:
     )
     parser.add_argument(
         "--ocr-lang",
-        default="chi_sim+chi_sim_vert",
-        help="Tesseract language pack(s) used by the Python OCR stage.",
-    )
-    parser.add_argument(
-        "--ocr-psm",
-        default="11",
-        help="Tesseract page segmentation mode.",
+        default="ch",
+        help="PaddleOCR language code used by the Python OCR stage.",
     )
     parser.add_argument(
         "--ocr-min-confidence",
         type=float,
-        default=25.0,
-        help="Discard OCR tokens below this confidence.",
+        default=0.7,
+        help="Discard OCR lines below this confidence.",
+    )
+    parser.add_argument(
+        "--ocr-text-detection-model-name",
+        default=None,
+        help="Optional PaddleOCR text detection model override.",
+    )
+    parser.add_argument(
+        "--ocr-text-recognition-model-name",
+        default=None,
+        help="Optional PaddleOCR text recognition model override.",
+    )
+    parser.add_argument(
+        "--ocr-text-det-limit-side-len",
+        type=int,
+        default=2500,
+        help="Maximum side length PaddleOCR should use before resizing.",
     )
     args = parser.parse_args()
 
@@ -137,22 +149,36 @@ def main() -> None:
             str(args.horizontal_margin_px),
         ]
     )
-    run(
-        [
-            "python3",
-            str(OCR),
-            "--input",
-            str(pages_dir),
-            "--output",
-            str(annotations_dir),
-            "--lang",
-            str(args.ocr_lang),
-            "--psm",
-            str(args.ocr_psm),
-            "--min-confidence",
-            str(args.ocr_min_confidence),
-        ]
-    )
+    ocr_cmd = [
+        str(VENV_PYTHON if VENV_PYTHON.exists() else "python3"),
+        str(OCR),
+        "--input",
+        str(pages_dir),
+        "--output",
+        str(annotations_dir),
+        "--lang",
+        str(args.ocr_lang),
+        "--min-confidence",
+        str(args.ocr_min_confidence),
+        "--text-det-limit-side-len",
+        str(args.ocr_text_det_limit_side_len),
+    ]
+    if args.ocr_text_detection_model_name:
+        ocr_cmd.extend(
+            [
+                "--text-detection-model-name",
+                str(args.ocr_text_detection_model_name),
+            ]
+        )
+    if args.ocr_text_recognition_model_name:
+        ocr_cmd.extend(
+            [
+                "--text-recognition-model-name",
+                str(args.ocr_text_recognition_model_name),
+            ]
+        )
+
+    run(ocr_cmd)
     build_manifest(args.series, args.chapter)
 
 
