@@ -108,6 +108,18 @@ button:disabled {
   margin-bottom: 4px;
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+}
+
+.toggle input {
+  width: 18px;
+  height: 18px;
+}
+
 .empty {
   color: var(--muted);
 }
@@ -172,11 +184,21 @@ button:disabled {
   background: rgba(184, 67, 47, 0.14);
   border: 1px solid rgba(184, 67, 47, 0.35);
   cursor: pointer;
+  clip-path: var(--clip-path, inset(0));
 }
 
 .hotspot:hover,
 .hotspot.active {
   background: rgba(184, 67, 47, 0.24);
+}
+
+.debug-polygon {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(37, 99, 235, 0.7);
+  background: rgba(37, 99, 235, 0.08);
+  clip-path: var(--clip-path, inset(0));
+  pointer-events: none;
 }
 
 @media (max-width: 960px) {

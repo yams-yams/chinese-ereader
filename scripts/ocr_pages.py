@@ -61,6 +61,16 @@ def normalize_box(left, top, width, height, page_width, page_height):
     }
 
 
+def normalize_polygon(polygon, page_width, page_height):
+    return [
+        {
+            "x": point[0] / page_width,
+            "y": 1 - (point[1] / page_height),
+        }
+        for point in polygon
+    ]
+
+
 def polygon_to_box(polygon, page_width, page_height):
     xs = [point[0] for point in polygon]
     ys = [point[1] for point in polygon]
@@ -93,6 +103,12 @@ def build_annotation(result, page_path: Path, min_confidence: float):
         if confidence < min_confidence:
             continue
 
+        fallback_poly = rec_polys[line_index] if line_index < len(rec_polys) else [
+            (0, 0),
+            (page_width, 0),
+            (page_width, page_height),
+            (0, page_height),
+        ]
         sentence_id = f"sentence-{sentence_counter:04d}"
         sentence_counter += 1
         sentence_character_ids = []
@@ -118,6 +134,7 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                         "id": character_id,
                         "text": token_text,
                         "box": polygon_to_box(token_region, page_width, page_height),
+                        "polygon": normalize_polygon(token_region, page_width, page_height),
                         "wordId": word_id,
                         "sentenceId": sentence_id,
                     }
@@ -131,6 +148,7 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                         "pinyin": "",
                         "translation": None,
                         "characterIds": [character_id],
+                        "polygon": normalize_polygon(token_region, page_width, page_height),
                     }
                 )
         else:
@@ -139,18 +157,12 @@ def build_annotation(result, page_path: Path, min_confidence: float):
             character_id = f"char-{character_counter:04d}"
             character_counter += 1
 
-            fallback_poly = rec_polys[line_index] if line_index < len(rec_polys) else [
-                (0, 0),
-                (page_width, 0),
-                (page_width, page_height),
-                (0, page_height),
-            ]
-
             characters.append(
                 {
                     "id": character_id,
                     "text": text,
                     "box": polygon_to_box(fallback_poly, page_width, page_height),
+                    "polygon": normalize_polygon(fallback_poly, page_width, page_height),
                     "wordId": word_id,
                     "sentenceId": sentence_id,
                 }
@@ -163,6 +175,7 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                     "pinyin": "",
                     "translation": None,
                     "characterIds": [character_id],
+                    "polygon": normalize_polygon(fallback_poly, page_width, page_height),
                 }
             )
 
@@ -173,11 +186,20 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                 "pinyin": "",
                 "translation": None,
                 "characterIds": sentence_character_ids,
+                "polygon": normalize_polygon(
+                    rec_polys[line_index] if line_index < len(rec_polys) else fallback_poly,
+                    page_width,
+                    page_height,
+                ),
             }
         )
 
     return {
         "sourceImage": page_path.name,
+        "imageSize": {
+            "width": page_width,
+            "height": page_height,
+        },
         "characters": characters,
         "words": words,
         "sentences": sentences,
@@ -190,6 +212,9 @@ def build_ocr(args):
         "text_det_limit_side_len": args.text_det_limit_side_len,
         "text_detection_model_name": args.text_detection_model_name or "PP-OCRv5_mobile_det",
         "text_recognition_model_name": args.text_recognition_model_name or "PP-OCRv5_mobile_rec",
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
     }
     return PaddleOCR(**kwargs)
 

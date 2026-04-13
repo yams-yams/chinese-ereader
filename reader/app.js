@@ -5,6 +5,7 @@ const state = {
   manifest: null,
   annotations: new Map(),
   activeCharacterKey: null,
+  showDebugPolygons: false,
 };
 
 let elements;
@@ -59,6 +60,43 @@ function renderChapterPanel() {
     { label: "Chapter", value: state.manifest.chapter },
     { label: "Segments", value: String(state.manifest.pageCount) },
   ]);
+}
+
+function polygonToStyle(polygon) {
+  if (!polygon || polygon.length === 0) {
+    return {
+      left: "0%",
+      top: "0%",
+      width: "0%",
+      height: "0%",
+      clipPath: "inset(0)",
+    };
+  }
+
+  const xs = polygon.map((point) => point.x);
+  const ys = polygon.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const width = Math.max(maxX - minX, 0.0001);
+  const height = Math.max(maxY - minY, 0.0001);
+
+  const clipPath = polygon
+    .map((point) => {
+      const localX = ((point.x - minX) / width) * 100;
+      const localY = ((maxY - point.y) / height) * 100;
+      return `${localX}% ${localY}%`;
+    })
+    .join(", ");
+
+  return {
+    left: `${minX * 100}%`,
+    top: `${(1 - maxY) * 100}%`,
+    width: `${width * 100}%`,
+    height: `${height * 100}%`,
+    clipPath: `polygon(${clipPath})`,
+  };
 }
 
 function renderNoOcrState() {
@@ -131,13 +169,23 @@ function buildPageFrame(page, index) {
   overlay.className = "overlay";
 
   for (const character of annotation.characters) {
+    const fallbackPolygon = character.box
+      ? [
+          { x: character.box.x, y: character.box.y + character.box.height },
+          { x: character.box.x + character.box.width, y: character.box.y + character.box.height },
+          { x: character.box.x + character.box.width, y: character.box.y },
+          { x: character.box.x, y: character.box.y },
+        ]
+      : [];
+    const geometry = polygonToStyle(character.polygon ?? fallbackPolygon);
     const hotspot = document.createElement("button");
     hotspot.className = "hotspot";
     hotspot.type = "button";
-    hotspot.style.left = `${character.box.x * 100}%`;
-    hotspot.style.top = `${(1 - character.box.y - character.box.height) * 100}%`;
-    hotspot.style.width = `${character.box.width * 100}%`;
-    hotspot.style.height = `${character.box.height * 100}%`;
+    hotspot.style.left = geometry.left;
+    hotspot.style.top = geometry.top;
+    hotspot.style.width = geometry.width;
+    hotspot.style.height = geometry.height;
+    hotspot.style.setProperty("--clip-path", geometry.clipPath);
     hotspot.title = character.text;
     hotspot.dataset.characterKey = characterKey(page.id, character.id);
 
@@ -156,6 +204,17 @@ function buildPageFrame(page, index) {
     }
 
     overlay.appendChild(hotspot);
+
+    if (state.showDebugPolygons) {
+      const debugPolygon = document.createElement("div");
+      debugPolygon.className = "debug-polygon";
+      debugPolygon.style.left = geometry.left;
+      debugPolygon.style.top = geometry.top;
+      debugPolygon.style.width = geometry.width;
+      debugPolygon.style.height = geometry.height;
+      debugPolygon.style.setProperty("--clip-path", geometry.clipPath);
+      overlay.appendChild(debugPolygon);
+    }
   }
 
   canvas.append(image, overlay);
@@ -190,6 +249,7 @@ async function init() {
     chapterStack: document.querySelector("#chapterStack"),
     wordPanel: document.querySelector("#wordPanel"),
     sentencePanel: document.querySelector("#sentencePanel"),
+    debugToggle: document.querySelector("#debugToggle"),
   };
 
   for (const [key, value] of Object.entries(elements)) {
@@ -199,6 +259,11 @@ async function init() {
   }
 
   state.manifest = await loadJson(manifestUrl);
+  elements.debugToggle.addEventListener("change", (event) => {
+    state.showDebugPolygons = event.target.checked;
+    renderChapter();
+    renderActiveCharacter();
+  });
   renderEmptyPanels();
   renderChapterPanel();
   await loadAnnotations();
