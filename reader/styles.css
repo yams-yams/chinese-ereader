@@ -87,6 +87,15 @@ button:disabled {
   cursor: default;
 }
 
+button.secondary {
+  background: rgba(31, 27, 24, 0.08);
+  color: var(--ink);
+}
+
+button.active {
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.45);
+}
+
 .panel {
   margin-top: 14px;
   padding: 14px;
@@ -290,6 +299,16 @@ button:disabled {
   font-size: 0.95rem;
 }
 
+.page-badge {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(184, 67, 47, 0.12);
+  color: var(--accent);
+  font-size: 0.74rem;
+}
+
 .page-meta {
   color: var(--muted);
   font-size: 0.82rem;
@@ -366,6 +385,10 @@ button:disabled {
   border-color: rgba(184, 67, 47, 0.35);
 }
 
+.hotspot:disabled {
+  opacity: 1;
+}
+
 .debug-polygon {
   position: absolute;
   inset: 0;
@@ -373,6 +396,220 @@ button:disabled {
   background: rgba(37, 99, 235, 0.08);
   clip-path: var(--clip-path, inset(0));
   pointer-events: none;
+}
+
+.debug-page-label {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  z-index: 5;
+  display: grid;
+  gap: 3px;
+  min-width: 150px;
+  padding: 10px 12px;
+  border: 1px solid rgba(184, 67, 47, 0.22);
+  border-radius: 16px;
+  background: rgba(255, 248, 240, 0.96);
+  box-shadow: 0 14px 34px rgba(60, 42, 24, 0.16);
+  color: var(--ink);
+  font-size: 0.8rem;
+  line-height: 1.25;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+
+.debug-page-label.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.debug-page-label-eyebrow {
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.debug-page-label-id {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.debug-page-label-file {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.review-panel h2 {
+  margin-bottom: 4px;
+}
+
+.review-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: start;
+}
+
+.review-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.review-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.review-status {
+  color: var(--muted);
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.field select,
+.field textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  font: inherit;
+}
+
+.field textarea {
+  resize: vertical;
+}
+
+.review-list-wrap {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.review-patch-list {
+  display: grid;
+  gap: 10px;
+}
+
+.review-patch-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.review-patch-title,
+.review-patch-meta {
+  margin: 0;
+}
+
+.review-patch-title {
+  font-weight: 600;
+}
+
+.review-patch-meta {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.review-patch-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.page-review-button {
+  align-self: center;
+}
+
+.review-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.review-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.saved-region,
+.draft-region {
+  fill: rgba(184, 67, 47, 0.14);
+  stroke: rgba(184, 67, 47, 0.95);
+  stroke-width: 0.6;
+}
+
+.draft-region-outline {
+  fill: none;
+  stroke: rgba(184, 67, 47, 0.95);
+  stroke-width: 0.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.saved-guide,
+.draft-guide {
+  fill: none;
+  stroke: rgba(25, 113, 194, 0.95);
+  stroke-width: 0.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.saved-guide {
+  stroke-dasharray: 1.4 1.2;
+}
+
+.review-point {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  margin-top: -5px;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.review-point.draft {
+  background: var(--accent);
+}
+
+.review-point.guide {
+  background: rgb(25, 113, 194);
+}
+
+.review-surface {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: crosshair;
+  opacity: 1;
+}
+
+.review-surface:disabled {
+  pointer-events: none;
+  opacity: 1;
 }
 
 @media (max-width: 960px) {
@@ -394,5 +631,9 @@ button:disabled {
 
   .debug-corner-toggle {
     justify-content: center;
+  }
+
+  .review-grid {
+    grid-template-columns: 1fr;
   }
 }

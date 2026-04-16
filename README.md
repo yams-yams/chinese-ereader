@@ -121,6 +121,24 @@ Validate a local Codex JSON response against the chapter schema:
 .venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/chapter1.json
 ```
 
+Build a prompt bundle for manually patched OCR misses:
+
+```bash
+.venv/bin/python scripts/build_codex_patch_prompt.py --series renjian-bailijin --chapter chapter-001 --patches data/review/renjian-bailijin/chapter-001/patches.json > tmp/codex-ocr-patches-prompt.json
+```
+
+Validate a local Codex patch JSON response:
+
+```bash
+.venv/bin/python scripts/validate_patch_output.py --input tmp/codex-ocr-patches-output.json
+```
+
+Merge accepted patch enrichments into the page annotations:
+
+```bash
+.venv/bin/python scripts/apply_annotation_patches.py --series renjian-bailijin --chapter chapter-001 --patches data/review/renjian-bailijin/chapter-001/patches.json --enrichment tmp/codex-ocr-patches-output.json
+```
+
 The archived OpenAI probe scripts are kept locally under `scripts/archive/` for reference, but the active workflow now goes through the Codex prompt builder and local `codex exec`.
 
 Print the expected JSON schema by itself:

@@ -28,15 +28,17 @@
           <h2>Page Sentences</h2>
           <p class="empty">Turn on debug mode and click within a page.</p>
         </div>
-        <label class="debug-corner-toggle">
-          <input id="debugToggle" type="checkbox" />
-          <span>Debug OCR regions</span>
-        </label>
+        <div class="panel review-panel" id="reviewPanel"></div>
       </aside>
       <main class="stage">
         <div id="chapterStack" class="chapter-stack"></div>
       </main>
     </div>
+    <label class="debug-corner-toggle">
+      <input id="debugToggle" type="checkbox" />
+      <span>Debug OCR regions</span>
+    </label>
+    <input id="reviewImportInput" type="file" accept="application/json,.json" hidden />
     <div id="hoverTooltip" class="hover-tooltip" aria-hidden="true"></div>
     <script type="module" src="./app.js"></script>
   </body>
