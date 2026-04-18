@@ -130,13 +130,12 @@ button:disabled {
 }
 
 .debug-corner-toggle {
-  position: fixed;
-  left: 18px;
-  bottom: 18px;
-  z-index: 30;
+  position: sticky;
+  bottom: 0;
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  margin-top: 14px;
   padding: 10px 14px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -150,6 +149,84 @@ button:disabled {
 .debug-corner-toggle input {
   width: 16px;
   height: 16px;
+}
+
+.page-review-list {
+  display: grid;
+  gap: 10px;
+}
+
+.page-review-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.page-review-item.active {
+  border-color: rgba(184, 67, 47, 0.4);
+  background: rgba(255, 245, 236, 0.95);
+}
+
+.page-review-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(184, 67, 47, 0.12);
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.page-review-delete:hover,
+.page-review-delete:focus-visible {
+  background: rgba(184, 67, 47, 0.2);
+}
+
+.page-review-body {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.page-review-body p {
+  margin: 0;
+}
+
+.page-review-index {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.page-review-text {
+  overflow-wrap: anywhere;
+}
+
+.page-review-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.page-review-reload {
+  background: rgba(31, 27, 24, 0.08);
+  color: var(--ink);
 }
 
 .hover-tooltip {
@@ -261,9 +338,9 @@ button:disabled {
 }
 
 .sentence-focus {
-  border: 2px solid rgba(184, 67, 47, 0.95);
-  background: rgba(255, 248, 232, 0.22);
-  box-shadow: 0 0 0 9999px rgba(24, 20, 17, 0.46);
+  border: 2px solid rgba(37, 99, 235, 0.95);
+  background: rgba(37, 99, 235, 0.18);
+  box-shadow: 0 0 0 9999px rgba(24, 20, 17, 0.38);
 }
 
 .word-focus.visible,
@@ -316,9 +393,6 @@ button:disabled {
   }
 
   .debug-corner-toggle {
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
     justify-content: center;
   }
 }

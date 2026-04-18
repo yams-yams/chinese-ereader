@@ -140,7 +140,7 @@ Print the expected JSON schema by itself:
 Serve the reader locally:
 
 ```bash
-python3 -m http.server 8000
+python3 scripts/serve_reader.py
 ```
 
 Then open:
