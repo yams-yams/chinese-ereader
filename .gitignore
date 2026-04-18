@@ -12,3 +12,5 @@ data/raw/**
 data/processed/**
 !data/processed/
 !data/processed/.gitkeep
+data/translated/archive/
+scripts/archive/

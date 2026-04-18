@@ -25,7 +25,7 @@ Given a chapter capture from Bilibili Manga:
 
 - Detect Chinese text regions on each page.
 - OCR the text.
-- Group characters into words and sentences.
+- Group OCR tokens into words and sentences.
 - Generate:
   - word-level pinyin
   - word-level English glosses
@@ -35,7 +35,7 @@ Given a chapter capture from Bilibili Manga:
 
 ### Phase 3: Build the reader
 
-- Show one page at a time with next/previous navigation.
+- Show the whole chapter in one continuous scroll.
 - Overlay character hotspots.
 - On hover, show word popup.
 - On click, show sentence popup.
@@ -84,7 +84,7 @@ python3 -m venv .venv
 Install OCR dependencies into the local environment:
 
 ```bash
-.venv/bin/pip install --upgrade pip setuptools wheel paddlepaddle paddleocr opencv-python-headless
+.venv/bin/pip install --upgrade pip setuptools wheel paddlepaddle paddleocr opencv-python-headless openai
 ```
 
 Process a chapter:
@@ -103,10 +103,36 @@ That command also keeps a small horizontal safety margin by default (`48px` on e
 
 The first PaddleOCR run will also download model files into `tmp/paddlex-cache/`.
 
+Build a prompt bundle for a local Codex run, including the expected output schema:
+
+```bash
+.venv/bin/python scripts/build_codex_full_chapter_prompt.py --series renjian-bailijin --chapter chapter-001 > tmp/codex-full-chapter-prompt.json
+```
+
+Run local Codex with the saved command wrapper:
+
+```bash
+./codex-full-chapter-command.sh
+```
+
+Validate a local Codex JSON response against the chapter schema:
+
+```bash
+.venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/chapter1.json
+```
+
+The archived OpenAI probe scripts are kept locally under `scripts/archive/` for reference, but the active workflow now goes through the Codex prompt builder and local `codex exec`.
+
+Print the expected JSON schema by itself:
+
+```bash
+.venv/bin/python scripts/validate_full_chapter_output.py --schema
+```
+
 Serve the reader locally:
 
 ```bash
-python3 -m http.server 8000
+python3 scripts/serve_reader.py
 ```
 
 Then open:
@@ -121,3 +147,5 @@ Then open:
 - The reader can navigate processed pages now.
 - The reader now renders a chapter as one continuous scroll surface.
 - The OCR stage now runs through PaddleOCR with the PP-OCRv5 mobile models, which gives better Chinese text detection and per-character regions than the previous Tesseract path.
+- The reader now supports polygon-aligned OCR overlays plus an optional debug overlay for inspecting OCR geometry.
+- The next step is replacing placeholder language helpers with an OpenAI-based enrichment pass that returns structured sentence and word analysis.
