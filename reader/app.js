@@ -4,9 +4,12 @@ const manifestUrl =
 const state = {
   manifest: null,
   annotations: new Map(),
+  rawAnnotations: new Map(),
+  deletedSentenceIdsByPage: new Map(),
   enrichment: null,
   hoveredWordKey: null,
   activeSentenceKey: null,
+  selectedDebugPageId: null,
   showDebugPolygons: false,
 };
 
@@ -15,7 +18,7 @@ let hoverIntentTimer = null;
 const PUNCTUATION_ONLY_RE = /^[\s.,!?;:'"()[\]{}\-_/\\|`~@#$%^&*+=<>，。！？、；：‘’“”《》〈〉「」『』（）【】…·—]+$/;
 
 async function loadJson(url) {
-  const response = await fetch(url);
+  const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) {
     return null;
   }
@@ -41,8 +44,16 @@ function renderEmptyPanels() {
   elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Click a character hotspot.</p>`;
 }
 
+function renderEmptyPageReviewPanel(message = "Turn on debug mode and click within a page.") {
+  elements.pageReviewPanel.innerHTML = `<h2>Page Sentences</h2><p class="empty">${message}</p>`;
+}
+
 function imagePath(relativePath) {
   return `../${relativePath}`;
+}
+
+function pageEntry(pageId) {
+  return state.manifest?.pages.find((page) => page.id === pageId) ?? null;
 }
 
 function tooltipForWord(word, fallbackText) {
@@ -191,6 +202,265 @@ function enrichAnnotation(pageId, annotation) {
   };
 }
 
+function filteredAnnotationForPage(pageId) {
+  const rawAnnotation = state.rawAnnotations.get(pageId);
+  if (!rawAnnotation) {
+    return null;
+  }
+
+  const deletedSentenceIds = state.deletedSentenceIdsByPage.get(pageId) ?? new Set();
+  if (deletedSentenceIds.size === 0) {
+    return {
+      ...rawAnnotation,
+      characters: rawAnnotation.characters.map((character) => ({ ...character })),
+      words: rawAnnotation.words.map((word) => ({ ...word })),
+      sentences: rawAnnotation.sentences.map((sentence) => ({ ...sentence })),
+    };
+  }
+
+  const keptSentences = rawAnnotation.sentences
+    .filter((sentence) => !deletedSentenceIds.has(sentence.id))
+    .map((sentence) => ({ ...sentence }));
+  const keptSentenceIds = new Set(keptSentences.map((sentence) => sentence.id));
+  const keptCharacters = rawAnnotation.characters
+    .filter((character) => keptSentenceIds.has(character.sentenceId))
+    .map((character) => ({ ...character }));
+  const keptCharacterIds = new Set(keptCharacters.map((character) => character.id));
+  const keptWordIds = new Set(keptCharacters.map((character) => character.wordId));
+  const keptWords = rawAnnotation.words
+    .filter((word) => {
+      if (keptWordIds.has(word.id)) {
+        return true;
+      }
+      return (word.characterIds ?? []).some((characterId) => keptCharacterIds.has(characterId));
+    })
+    .map((word) => ({ ...word }));
+
+  return {
+    ...rawAnnotation,
+    characters: keptCharacters,
+    words: keptWords,
+    sentences: keptSentences,
+  };
+}
+
+function rebuildAnnotation(pageId) {
+  const filteredAnnotation = filteredAnnotationForPage(pageId);
+  if (!filteredAnnotation) {
+    return;
+  }
+
+  state.annotations.set(pageId, enrichAnnotation(pageId, filteredAnnotation));
+}
+
+function sentenceDisplayText(sentence, index) {
+  const text = sentence.text?.trim();
+  if (text) {
+    return text;
+  }
+  return `Sentence ${index + 1}`;
+}
+
+function renderPageReviewPanel() {
+  if (!state.showDebugPolygons) {
+    renderEmptyPageReviewPanel("Turn on debug mode and click within a page.");
+    return;
+  }
+
+  if (!state.selectedDebugPageId) {
+    renderEmptyPageReviewPanel("Click on text or non-text within a page to inspect its OCR sentences.");
+    return;
+  }
+
+  const annotation = state.annotations.get(state.selectedDebugPageId);
+  if (!annotation) {
+    renderEmptyPageReviewPanel("No OCR annotations are loaded for this page.");
+    return;
+  }
+
+  const itemsMarkup = annotation.sentences.length > 0
+    ? `
+      <div class="page-review-list">
+        ${annotation.sentences
+          .map((sentence, index) => {
+            const isActive = sentenceKey(state.selectedDebugPageId, sentence.id) === state.activeSentenceKey;
+            return `
+              <div class="page-review-item ${isActive ? "active" : ""}" data-sentence-id="${sentence.id}">
+                <button
+                  class="page-review-delete"
+                  type="button"
+                  data-delete-sentence-id="${sentence.id}"
+                  aria-label="Delete sentence ${index + 1}"
+                  title="Delete sentence"
+                >🗑</button>
+                <button
+                  class="page-review-body"
+                  type="button"
+                  data-select-sentence-id="${sentence.id}"
+                >
+                  <p class="page-review-index">Sentence ${index + 1}</p>
+                  <p class="page-review-text">${sentenceDisplayText(sentence, index)}</p>
+                </button>
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    `
+    : `<p class="empty">No OCR sentences remain on this page.</p>`;
+
+  elements.pageReviewPanel.innerHTML = `
+    <h2>Page Sentences</h2>
+    <p><span class="label">Page</span>${state.selectedDebugPageId}</p>
+    ${itemsMarkup}
+    <div class="page-review-actions">
+      <button class="page-review-reload" type="button" id="reloadPageReviewButton">Reload Page</button>
+    </div>
+  `;
+
+  for (const deleteButton of elements.pageReviewPanel.querySelectorAll("[data-delete-sentence-id]")) {
+    deleteButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const sentenceId = event.currentTarget.dataset.deleteSentenceId;
+      if (!sentenceId) {
+        return;
+      }
+      deleteSentenceFromPage(state.selectedDebugPageId, sentenceId);
+    });
+  }
+
+  for (const selectButton of elements.pageReviewPanel.querySelectorAll("[data-select-sentence-id]")) {
+    selectButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const sentenceId = event.currentTarget.dataset.selectSentenceId;
+      if (!sentenceId) {
+        return;
+      }
+      selectSentenceFromReviewPanel(state.selectedDebugPageId, sentenceId);
+    });
+  }
+
+  const reloadButton = elements.pageReviewPanel.querySelector("#reloadPageReviewButton");
+  if (reloadButton) {
+    reloadButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await reloadSelectedDebugPage();
+    });
+  }
+}
+
+function selectDebugPage(pageId) {
+  state.selectedDebugPageId = pageId;
+  renderPageReviewPanel();
+}
+
+async function reloadSelectedDebugPage() {
+  if (!state.selectedDebugPageId) {
+    return;
+  }
+
+  const page = pageEntry(state.selectedDebugPageId);
+  if (page) {
+    const rawAnnotation =
+      (await loadJson(imagePath(page.annotation))) ?? {
+        sourceImage: page.image,
+        characters: [],
+        words: [],
+        sentences: [],
+      };
+    state.rawAnnotations.set(page.id, rawAnnotation);
+  }
+  state.deletedSentenceIdsByPage.delete(state.selectedDebugPageId);
+  rebuildAnnotation(state.selectedDebugPageId);
+  rerenderChapterPreservingScroll();
+  refreshPanelsFromSelection();
+  renderPageReviewPanel();
+  renderInteractionState();
+}
+
+function selectSentenceFromReviewPanel(pageId, sentenceId) {
+  const annotation = state.annotations.get(pageId);
+  const sentence = annotation?.sentences.find((candidate) => candidate.id === sentenceId);
+  if (!sentence) {
+    return;
+  }
+
+  state.selectedDebugPageId = pageId;
+  state.hoveredWordKey = null;
+  state.activeSentenceKey = sentenceKey(pageId, sentenceId);
+  hideHoverTooltip();
+  if (hoverIntentTimer) {
+    clearTimeout(hoverIntentTimer);
+    hoverIntentTimer = null;
+  }
+
+  const charactersById = new Map(
+    annotation.characters.map((character) => [character.id, character]),
+  );
+  elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">Hover a character hotspot.</p>`;
+  updateSentencePanel(
+    sentence,
+    state.showDebugPolygons
+      ? { polygon: sentencePolygon(sentence, charactersById) }
+      : {},
+  );
+  renderPageReviewPanel();
+  renderInteractionState();
+}
+
+async function deleteSentenceFromPage(pageId, sentenceId) {
+  const annotation = state.annotations.get(pageId);
+  const sentence = annotation?.sentences.find((candidate) => candidate.id === sentenceId);
+  if (!sentence) {
+    return;
+  }
+
+  const confirmed = window.confirm(`Delete "${sentenceDisplayText(sentence, 0)}" from ${pageId}?`);
+  if (!confirmed) {
+    return;
+  }
+
+  const page = pageEntry(pageId);
+  if (!page) {
+    return;
+  }
+
+  const response = await fetch("/api/delete-sentence", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      annotationPath: page.annotation,
+      sentenceId,
+    }),
+  });
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    if (response.status === 404 || response.status === 501) {
+      window.alert("Delete API is unavailable. Restart the reader with `python3 scripts/serve_reader.py`.");
+    } else {
+      window.alert(`Failed to delete the sentence from disk (${response.status}). ${responseText}`);
+    }
+    return;
+  }
+
+  const updatedAnnotation = await response.json();
+  state.rawAnnotations.set(pageId, updatedAnnotation);
+  state.deletedSentenceIdsByPage.delete(pageId);
+
+  if (sentenceKey(pageId, sentenceId) === state.activeSentenceKey) {
+    state.activeSentenceKey = null;
+  }
+
+  rebuildAnnotation(pageId);
+  rerenderChapterPreservingScroll();
+  refreshPanelsFromSelection();
+  renderPageReviewPanel();
+  renderInteractionState();
+}
+
 async function loadEnrichment() {
   const enrichmentPath = enrichmentPathForManifest(state.manifest);
   if (!enrichmentPath) {
@@ -211,7 +481,8 @@ async function loadAnnotations() {
         sentences: [],
       };
 
-    state.annotations.set(page.id, enrichAnnotation(page.id, rawAnnotation));
+    state.rawAnnotations.set(page.id, rawAnnotation);
+    rebuildAnnotation(page.id);
   });
   await Promise.all(annotationPromises);
 }
@@ -282,6 +553,41 @@ function boundsStyleFromPolygons(polygons, paddingX = 0.01, paddingY = 0) {
   };
 }
 
+function sentencePolygon(sentence, charactersById) {
+  if (sentence?.polygon?.length) {
+    return sentence.polygon;
+  }
+
+  if (!sentence?.characterIds?.length) {
+    return null;
+  }
+
+  const sentencePolygons = sentence.characterIds
+    .map((id) => charactersById.get(id)?.polygon)
+    .filter(Boolean);
+  const bounds = boundsStyleFromPolygons(sentencePolygons, 0, 0);
+  if (!bounds) {
+    return null;
+  }
+
+  const left = Number.parseFloat(bounds.left) / 100;
+  const top = Number.parseFloat(bounds.top) / 100;
+  const width = Number.parseFloat(bounds.width) / 100;
+  const height = Number.parseFloat(bounds.height) / 100;
+
+  const maxY = 1 - top;
+  const minY = maxY - height;
+  const minX = left;
+  const maxX = left + width;
+
+  return [
+    { x: minX, y: maxY },
+    { x: maxX, y: maxY },
+    { x: maxX, y: minY },
+    { x: minX, y: minY },
+  ];
+}
+
 function renderNoOcrState() {
   elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">No OCR annotations are loaded yet for this chapter.</p>`;
   elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Sentence annotations will appear here after OCR succeeds.</p>`;
@@ -320,12 +626,11 @@ function clearInteractionState() {
   }
   hideHoverTooltip();
   renderEmptyPanels();
+  renderPageReviewPanel();
   renderInteractionState();
 }
 
 function renderInteractionState() {
-  const hasActiveSentence = Boolean(state.activeSentenceKey);
-
   updateFocusOverlays();
 
   for (const hotspot of elements.chapterStack.querySelectorAll(".hotspot")) {
@@ -343,6 +648,19 @@ function renderInteractionState() {
   for (const focus of elements.chapterStack.querySelectorAll(".sentence-focus")) {
     focus.classList.toggle("visible", focus.dataset.sentenceKey === state.activeSentenceKey);
   }
+}
+
+function keyId(scopedKey) {
+  if (!scopedKey) {
+    return null;
+  }
+
+  const separatorIndex = scopedKey.indexOf(":");
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  return scopedKey.slice(separatorIndex + 1);
 }
 
 function updateFocusOverlays() {
@@ -363,7 +681,7 @@ function updateFocusOverlays() {
       const wordPolygons = activeWord.characterIds
         .map((id) => charactersById.get(id)?.polygon)
         .filter(Boolean);
-    const geometry = boundsStyleFromPolygons(wordPolygons, 0.003, 0);
+      const geometry = boundsStyleFromPolygons(wordPolygons, 0.003, 0);
       if (geometry) {
         wordFocus.dataset.wordKey = wordKey(pageId, activeWord.id);
         applyGeometry(wordFocus, geometry);
@@ -410,7 +728,7 @@ function updateWordPanel(word) {
   ]);
 }
 
-function updateSentencePanel(sentence) {
+function updateSentencePanel(sentence, options = {}) {
   if (!sentence) {
     return;
   }
@@ -429,6 +747,43 @@ function updateSentencePanel(sentence) {
   ]);
 }
 
+function refreshPanelsFromSelection() {
+  if (state.hoveredWordKey) {
+    for (const [pageId, annotation] of state.annotations.entries()) {
+      const word = annotation.words.find((candidate) => wordKey(pageId, candidate.id) === state.hoveredWordKey);
+      if (word) {
+        updateWordPanel(word);
+        break;
+      }
+    }
+  } else {
+    elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">Hover a character hotspot.</p>`;
+  }
+
+  if (state.activeSentenceKey) {
+    for (const [pageId, annotation] of state.annotations.entries()) {
+      const sentenceId = keyId(state.activeSentenceKey);
+      const sentence = annotation.sentences.find((candidate) => candidate.id === sentenceId);
+      if (!sentence || sentenceKey(pageId, sentence.id) !== state.activeSentenceKey) {
+        continue;
+      }
+
+      const charactersById = new Map(
+        annotation.characters.map((character) => [character.id, character]),
+      );
+      updateSentencePanel(
+        sentence,
+        state.showDebugPolygons
+          ? { polygon: sentencePolygon(sentence, charactersById) }
+          : {},
+      );
+      return;
+    }
+  }
+
+  elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Click a character hotspot.</p>`;
+}
+
 function buildPageFrame(page, index) {
   if (!state.annotations.has(page.id)) {
     return null;
@@ -438,6 +793,9 @@ function buildPageFrame(page, index) {
   const wordById = new Map(annotation.words.map((word) => [word.id, word]));
   const sentenceById = new Map(
     annotation.sentences.map((sentence) => [sentence.id, sentence]),
+  );
+  const charactersById = new Map(
+    annotation.characters.map((character) => [character.id, character]),
   );
 
   const frame = document.createElement("section");
@@ -473,6 +831,24 @@ function buildPageFrame(page, index) {
   const sentenceFocus = document.createElement("div");
   sentenceFocus.className = "sentence-focus";
   overlay.appendChild(sentenceFocus);
+
+  canvas.addEventListener("click", (event) => {
+    if (!state.showDebugPolygons || event.target.closest(".hotspot")) {
+      return;
+    }
+
+    event.stopPropagation();
+    selectDebugPage(page.id);
+    state.hoveredWordKey = null;
+    state.activeSentenceKey = null;
+    hideHoverTooltip();
+    if (hoverIntentTimer) {
+      clearTimeout(hoverIntentTimer);
+      hoverIntentTimer = null;
+    }
+    renderEmptyPanels();
+    renderInteractionState();
+  });
 
   for (const character of annotation.characters) {
     const fallbackPolygon = character.box
@@ -527,6 +903,8 @@ function buildPageFrame(page, index) {
     });
 
     hotspot.addEventListener("click", () => {
+      const sentence = sentenceById.get(character.sentenceId);
+      selectDebugPage(page.id);
       state.hoveredWordKey = wordKey(page.id, character.wordId);
       state.activeSentenceKey = sentenceKey(page.id, character.sentenceId);
       hideHoverTooltip();
@@ -535,7 +913,12 @@ function buildPageFrame(page, index) {
         hoverIntentTimer = null;
       }
       updateWordPanel(currentWord);
-      updateSentencePanel(sentenceById.get(character.sentenceId));
+      updateSentencePanel(
+        sentence,
+        state.showDebugPolygons
+          ? { polygon: sentencePolygon(sentence, charactersById) }
+          : {},
+      );
       renderInteractionState();
     });
 
@@ -575,6 +958,7 @@ async function init() {
     chapterStack: document.querySelector("#chapterStack"),
     wordPanel: document.querySelector("#wordPanel"),
     sentencePanel: document.querySelector("#sentencePanel"),
+    pageReviewPanel: document.querySelector("#pageReviewPanel"),
     debugToggle: document.querySelector("#debugToggle"),
     hoverTooltip: document.querySelector("#hoverTooltip"),
   };
@@ -589,16 +973,20 @@ async function init() {
   elements.debugToggle.addEventListener("change", (event) => {
     state.showDebugPolygons = event.target.checked;
     rerenderChapterPreservingScroll();
+    refreshPanelsFromSelection();
+    renderPageReviewPanel();
     renderInteractionState();
   });
   document.addEventListener("click", (event) => {
     const clickedHotspot = event.target.closest(".hotspot");
     const clickedToggle = event.target.closest(".debug-corner-toggle");
-    if (!clickedHotspot && !clickedToggle) {
+    const clickedReviewPanel = event.target.closest("#pageReviewPanel");
+    if (!clickedHotspot && !clickedToggle && !clickedReviewPanel) {
       clearInteractionState();
     }
   });
   renderEmptyPanels();
+  renderEmptyPageReviewPanel();
   renderChapterPanel();
   await loadEnrichment();
   await loadAnnotations();
