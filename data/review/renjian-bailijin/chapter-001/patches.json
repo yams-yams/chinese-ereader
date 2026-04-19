@@ -1,0 +1,51 @@
+{
+  "series": "renjian-bailijin",
+  "chapter": "chapter-001",
+  "patches": [
+    {
+      "patch_id": "patch-0001",
+      "page_id": "page-006",
+      "kind": "missing_region",
+      "region": {
+        "polygon": [
+          {
+            "x": 0.08469387755102041,
+            "y": 0.8007015166303292
+          },
+          {
+            "x": 0.27755102040816326,
+            "y": 0.8006385438075915
+          },
+          {
+            "x": 0.2816326530612245,
+            "y": 0.7986234134799846
+          },
+          {
+            "x": 0.0836734693877551,
+            "y": 0.7985604406572469
+          }
+        ]
+      },
+      "text_flow": {
+        "mode": "vertical_rl",
+        "guide": [
+          {
+            "x": 0.27653061224489794,
+            "y": 0.7988753047709354
+          },
+          {
+            "x": 0.09081632653061225,
+            "y": 0.7988123319481977
+          }
+        ]
+      },
+      "ocr_candidate": "[][],",
+      "user_transcript": "[][],",
+      "anchor": {
+        "insert_after_sentence_id": "sentence-0015",
+        "insert_before_sentence_id": null
+      },
+      "notes": ""
+    }
+  ]
+}

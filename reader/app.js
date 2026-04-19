@@ -1,6 +1,8 @@
 const manifestUrl =
   "../data/processed/chapters/renjian-bailijin/chapter-001.json";
 
+const PUNCTUATION_ONLY_RE = /^[\s.,!?;:'"()[\]{}\-_/\\|`~@#$%^&*+=<>，。！？、；：‘’“”《》〈〉「」『』（）【】…·—]+$/;
+
 const state = {
   manifest: null,
   annotations: new Map(),
@@ -11,11 +13,42 @@ const state = {
   activeSentenceKey: null,
   selectedDebugPageId: null,
   showDebugPolygons: false,
+  review: {
+    enabled: false,
+    activeTool: null,
+    storageKey: null,
+    patches: [],
+    draft: makeEmptyDraft(),
+    anchorMode: "append",
+    isProcessing: false,
+    statusMessage: "",
+    errorMessage: "",
+    needsReload: false,
+  },
 };
 
 let elements;
 let hoverIntentTimer = null;
-const PUNCTUATION_ONLY_RE = /^[\s.,!?;:'"()[\]{}\-_/\\|`~@#$%^&*+=<>，。！？、；：‘’“”《》〈〉「」『』（）【】…·—]+$/;
+
+function makeEmptyDraft(pageId = "") {
+  return {
+    patch_id: null,
+    page_id: pageId,
+    kind: "missing_region",
+    region: { polygon: [] },
+    text_flow: {
+      mode: "vertical_rl",
+      guide: [],
+    },
+    ocr_candidate: "",
+    user_transcript: "",
+    anchor: {
+      insert_after_sentence_id: "",
+      insert_before_sentence_id: "",
+    },
+    notes: "",
+  };
+}
 
 async function loadJson(url) {
   const response = await fetch(url, { cache: "no-store" });
@@ -23,6 +56,33 @@ async function loadJson(url) {
     return null;
   }
   return response.json();
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  let body = null;
+  try {
+    body = await response.json();
+  } catch (error) {
+    body = null;
+  }
+
+  return { response, body };
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 function panelMarkup(title, fields) {
@@ -33,7 +93,7 @@ function panelMarkup(title, fields) {
       .map(
         ({ label, value }) => `
           <p><span class="label">${label}</span>${value ?? "Pending"}</p>
-        `
+        `,
       )
       .join("")}
   `;
@@ -359,7 +419,15 @@ async function reloadSelectedDebugPage() {
     return;
   }
 
-  const page = pageEntry(state.selectedDebugPageId);
+  await reloadPageById(state.selectedDebugPageId);
+}
+
+async function reloadPageById(pageId) {
+  if (!pageId) {
+    return;
+  }
+
+  const page = pageEntry(pageId);
   if (page) {
     const rawAnnotation =
       (await loadJson(imagePath(page.annotation))) ?? {
@@ -370,8 +438,8 @@ async function reloadSelectedDebugPage() {
       };
     state.rawAnnotations.set(page.id, rawAnnotation);
   }
-  state.deletedSentenceIdsByPage.delete(state.selectedDebugPageId);
-  rebuildAnnotation(state.selectedDebugPageId);
+  state.deletedSentenceIdsByPage.delete(pageId);
+  rebuildAnnotation(pageId);
   rerenderChapterPreservingScroll();
   refreshPanelsFromSelection();
   renderPageReviewPanel();
@@ -635,6 +703,7 @@ function renderInteractionState() {
 
   for (const hotspot of elements.chapterStack.querySelectorAll(".hotspot")) {
     hotspot.classList.toggle("debug-visible", state.showDebugPolygons);
+    hotspot.disabled = state.review.enabled;
   }
 
   for (const lowlight of elements.chapterStack.querySelectorAll(".page-lowlight")) {
@@ -784,6 +853,776 @@ function refreshPanelsFromSelection() {
   elements.sentencePanel.innerHTML = `<h2>Sentence</h2><p class="empty">Click a character hotspot.</p>`;
 }
 
+function normalizedPointToCss(point) {
+  return {
+    left: `${point.x * 100}%`,
+    top: `${(1 - point.y) * 100}%`,
+  };
+}
+
+function polygonSvgPoints(points) {
+  return points
+    .map((point) => `${point.x.toFixed(6)},${(1 - point.y).toFixed(6)}`)
+    .join(" ");
+}
+
+function polylineSvgPoints(points) {
+  return polygonSvgPoints(points);
+}
+
+function pointerToNormalizedPoint(event, container) {
+  const rect = container.getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width;
+  const y = 1 - (event.clientY - rect.top) / rect.height;
+  return {
+    x: Math.min(Math.max(x, 0), 1),
+    y: Math.min(Math.max(y, 0), 1),
+  };
+}
+
+function getPageReviewPatches(pageId) {
+  return state.review.patches.filter((patch) => patch.page_id === pageId);
+}
+
+function sentenceLabel(sentence) {
+  const text = String(sentence.text ?? "").trim();
+  return text.length > 28 ? `${text.slice(0, 28)}...` : text;
+}
+
+function nextPatchId() {
+  const highest = state.review.patches.reduce((max, patch) => {
+    const match = String(patch.patch_id).match(/patch-(\d+)$/);
+    if (!match) {
+      return max;
+    }
+    return Math.max(max, Number(match[1]));
+  }, 0);
+  return `patch-${String(highest + 1).padStart(4, "0")}`;
+}
+
+function reviewStoragePayload() {
+  return {
+    patches: state.review.patches,
+    draft: state.review.draft,
+    anchorMode: state.review.anchorMode,
+  };
+}
+
+function persistReviewState() {
+  if (!state.review.storageKey) {
+    return;
+  }
+
+  window.localStorage.setItem(state.review.storageKey, JSON.stringify(reviewStoragePayload()));
+}
+
+function loadReviewStateFromStorage() {
+  if (!state.review.storageKey) {
+    return;
+  }
+
+  const raw = window.localStorage.getItem(state.review.storageKey);
+  if (!raw) {
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    state.review.patches = Array.isArray(parsed.patches) ? parsed.patches : [];
+    state.review.draft = parsed.draft ? parsed.draft : makeEmptyDraft(state.manifest.pages[0]?.id ?? "");
+    state.review.anchorMode = parsed.anchorMode || inferAnchorMode(state.review.draft);
+  } catch (error) {
+    console.warn("Failed to restore review state", error);
+  }
+}
+
+function replaceDraft(nextDraft) {
+  state.review.draft = {
+    ...makeEmptyDraft(nextDraft.page_id),
+    ...nextDraft,
+    region: {
+      polygon: [...(nextDraft.region?.polygon ?? [])],
+    },
+    text_flow: {
+      mode: nextDraft.text_flow?.mode ?? "vertical_rl",
+      guide: [...(nextDraft.text_flow?.guide ?? [])],
+    },
+    anchor: {
+      insert_after_sentence_id: nextDraft.anchor?.insert_after_sentence_id ?? "",
+      insert_before_sentence_id: nextDraft.anchor?.insert_before_sentence_id ?? "",
+    },
+  };
+  state.review.anchorMode = inferAnchorMode(state.review.draft);
+  persistReviewState();
+  renderReviewPanel();
+}
+
+function setDraftPage(pageId) {
+  const keepExisting = state.review.draft.page_id === pageId;
+  const nextDraft = keepExisting ? state.review.draft : makeEmptyDraft(pageId);
+  replaceDraft(nextDraft);
+  rerenderChapterPreservingScroll();
+  renderInteractionState();
+}
+
+function setActiveReviewTool(tool) {
+  state.review.enabled = true;
+  state.review.activeTool = state.review.activeTool === tool ? null : tool;
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function addDraftPoint(tool, point) {
+  if (tool === "region") {
+    state.review.draft.region.polygon.push(point);
+  } else if (tool === "guide") {
+    state.review.draft.text_flow.guide.push(point);
+  }
+  persistReviewState();
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function undoDraftPoint(tool) {
+  if (tool === "region") {
+    state.review.draft.region.polygon.pop();
+  } else if (tool === "guide") {
+    state.review.draft.text_flow.guide.pop();
+  }
+  persistReviewState();
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function clearDraftGeometry(tool) {
+  if (tool === "region") {
+    state.review.draft.region.polygon = [];
+  } else if (tool === "guide") {
+    state.review.draft.text_flow.guide = [];
+  } else if (tool === null) {
+    state.review.draft = makeEmptyDraft(state.review.draft.page_id);
+  } else {
+    return;
+  }
+  persistReviewState();
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function updateDraftField(field, value) {
+  if (field === "ocr_candidate" || field === "user_transcript" || field === "notes") {
+    state.review.draft[field] = value;
+  } else if (field === "text_flow.mode") {
+    state.review.draft.text_flow.mode = value;
+  }
+  persistReviewState();
+}
+
+function inferAnchorMode(draft) {
+  if (draft.anchor?.insert_after_sentence_id) {
+    return "after";
+  }
+  if (draft.anchor?.insert_before_sentence_id) {
+    return "before";
+  }
+  return "append";
+}
+
+function setDraftAnchor(mode, sentenceId = "") {
+  state.review.anchorMode = mode;
+  state.review.draft.anchor.insert_after_sentence_id = "";
+  state.review.draft.anchor.insert_before_sentence_id = "";
+  if (mode === "after" && sentenceId) {
+    state.review.draft.anchor.insert_after_sentence_id = sentenceId;
+  }
+  if (mode === "before" && sentenceId) {
+    state.review.draft.anchor.insert_before_sentence_id = sentenceId;
+  }
+  persistReviewState();
+  renderReviewPanel();
+}
+
+function draftAnchorMode() {
+  return state.review.anchorMode || inferAnchorMode(state.review.draft);
+}
+
+function draftAnchorSentenceId() {
+  return (
+    state.review.draft.anchor.insert_after_sentence_id ||
+    state.review.draft.anchor.insert_before_sentence_id ||
+    ""
+  );
+}
+
+function validateDraft() {
+  if (!state.review.draft.page_id) {
+    return "Choose a segment for the patch.";
+  }
+  if (state.review.draft.region.polygon.length < 3) {
+    return "Draw at least 3 points for the missing region.";
+  }
+  if (state.review.draft.text_flow.guide.length < 2) {
+    return "Draw at least 2 points for the text-flow guide.";
+  }
+  return null;
+}
+
+function buildPatchFromDraft() {
+  const patchId = state.review.draft.patch_id || nextPatchId();
+  return {
+    patch_id: patchId,
+    page_id: state.review.draft.page_id,
+    kind: "missing_region",
+    region: {
+      polygon: [...state.review.draft.region.polygon],
+    },
+    text_flow: {
+      mode: state.review.draft.text_flow.mode,
+      guide: [...state.review.draft.text_flow.guide],
+    },
+    ocr_candidate: state.review.draft.ocr_candidate.trim(),
+    user_transcript: state.review.draft.user_transcript.trim(),
+    anchor: {
+      insert_after_sentence_id: state.review.draft.anchor.insert_after_sentence_id || null,
+      insert_before_sentence_id: state.review.draft.anchor.insert_before_sentence_id || null,
+    },
+    notes: state.review.draft.notes.trim(),
+  };
+}
+
+function saveDraftPatch() {
+  const error = validateDraft();
+  if (error) {
+    window.alert(error);
+    return;
+  }
+
+  const patch = buildPatchFromDraft();
+  const patchId = patch.patch_id;
+  const existingIndex = state.review.patches.findIndex((item) => item.patch_id === patchId);
+  if (existingIndex >= 0) {
+    state.review.patches.splice(existingIndex, 1, patch);
+  } else {
+    state.review.patches.push(patch);
+  }
+
+  state.review.statusMessage = `Saved ${patchId}.`;
+  state.review.errorMessage = "";
+  state.review.draft = makeEmptyDraft(state.review.draft.page_id);
+  persistReviewState();
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function loadPatchIntoDraft(patchId) {
+  const patch = state.review.patches.find((item) => item.patch_id === patchId);
+  if (!patch) {
+    return;
+  }
+  replaceDraft({
+    ...patch,
+    anchor: {
+      insert_after_sentence_id: patch.anchor?.insert_after_sentence_id ?? "",
+      insert_before_sentence_id: patch.anchor?.insert_before_sentence_id ?? "",
+    },
+  });
+  rerenderChapterPreservingScroll();
+  renderInteractionState();
+}
+
+function deletePatch(patchId) {
+  state.review.patches = state.review.patches.filter((patch) => patch.patch_id !== patchId);
+  if (state.review.draft.patch_id === patchId) {
+    state.review.draft = makeEmptyDraft(state.review.draft.page_id);
+  }
+  persistReviewState();
+  renderReviewPanel();
+  rerenderChapterPreservingScroll();
+}
+
+function reviewExportPayload() {
+  return {
+    series: state.manifest.series,
+    chapter: state.manifest.chapter,
+    patches: state.review.patches.map((patch) => ({
+      ...patch,
+      anchor: {
+        insert_after_sentence_id: patch.anchor?.insert_after_sentence_id ?? null,
+        insert_before_sentence_id: patch.anchor?.insert_before_sentence_id ?? null,
+      },
+    })),
+  };
+}
+
+function downloadTextFile(filename, contents, type = "application/json") {
+  const blob = new Blob([contents], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportReviewPatches() {
+  const payload = JSON.stringify(reviewExportPayload(), null, 2);
+  downloadTextFile(`${state.manifest.chapter}-patches.json`, payload);
+}
+
+function handleReviewImport(file) {
+  if (!file) {
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result));
+      if (!Array.isArray(parsed.patches)) {
+        throw new Error("Patch file is missing a patches array.");
+      }
+      state.review.patches = parsed.patches;
+      state.review.draft = makeEmptyDraft(state.manifest.pages[0]?.id ?? "");
+      persistReviewState();
+      renderReviewPanel();
+      rerenderChapterPreservingScroll();
+    } catch (error) {
+      window.alert(error.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function currentDraftPageImage() {
+  if (!state.review.draft.page_id) {
+    return null;
+  }
+  return elements.chapterStack.querySelector(
+    `.page-frame[data-page-id="${CSS.escape(state.review.draft.page_id)}"] .page-image`,
+  );
+}
+
+function downloadDraftCrop() {
+  if (state.review.draft.region.polygon.length < 3) {
+    window.alert("Draw a region first.");
+    return;
+  }
+
+  const image = currentDraftPageImage();
+  if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight) {
+    window.alert("The page image is not ready yet.");
+    return;
+  }
+
+  const xs = state.review.draft.region.polygon.map((point) => point.x);
+  const ys = state.review.draft.region.polygon.map((point) => point.y);
+  const minX = Math.max(0, Math.min(...xs));
+  const maxX = Math.min(1, Math.max(...xs));
+  const minY = Math.max(0, Math.min(...ys));
+  const maxY = Math.min(1, Math.max(...ys));
+
+  const sourceX = Math.floor(minX * image.naturalWidth);
+  const sourceY = Math.floor((1 - maxY) * image.naturalHeight);
+  const sourceWidth = Math.max(1, Math.ceil((maxX - minX) * image.naturalWidth));
+  const sourceHeight = Math.max(1, Math.ceil((maxY - minY) * image.naturalHeight));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceWidth;
+  canvas.height = sourceHeight;
+  const context = canvas.getContext("2d");
+  context.drawImage(
+    image,
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    0,
+    0,
+    sourceWidth,
+    sourceHeight,
+  );
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${state.review.draft.page_id}-${state.review.draft.patch_id || "draft"}-crop.png`;
+    link.click();
+    URL.revokeObjectURL(url);
+  });
+}
+
+function reviewStatusText() {
+  const draft = state.review.draft;
+  const toolLabel =
+    state.review.activeTool === "region"
+      ? "Click the page to place region points."
+      : state.review.activeTool === "guide"
+        ? "Click the page to place guide points."
+        : "Choose a drawing tool to keep building the patch.";
+
+  return `${toolLabel} Region points: ${draft.region.polygon.length}. Guide points: ${draft.text_flow.guide.length}.`;
+}
+
+function reviewPatchListMarkup() {
+  if (state.review.patches.length === 0) {
+    return `<p class="empty">No saved patches yet.</p>`;
+  }
+
+  return `
+    <div class="review-patch-list">
+      ${state.review.patches
+        .map((patch) => {
+          const snippet = patch.user_transcript || patch.ocr_candidate || "Untitled patch";
+          return `
+            <article class="review-patch-item">
+              <div>
+                <p class="review-patch-title">${escapeHtml(patch.patch_id)}</p>
+                <p class="review-patch-meta">${escapeHtml(patch.page_id)} · ${escapeHtml(snippet.slice(0, 28))}</p>
+              </div>
+              <div class="review-patch-actions">
+                <button type="button" data-review-load="${escapeHtml(patch.patch_id)}">Load</button>
+                <button type="button" class="secondary" data-review-delete="${escapeHtml(patch.patch_id)}">Delete</button>
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+async function processDraftPatch() {
+  const error = validateDraft();
+  if (error) {
+    window.alert(error);
+    return;
+  }
+
+  const page = pageEntry(state.review.draft.page_id);
+  if (!page) {
+    window.alert("Could not find the selected page.");
+    return;
+  }
+
+  state.review.isProcessing = true;
+  state.review.errorMessage = "";
+  state.review.statusMessage = "Running OCR and patch pipeline...";
+  renderReviewPanel();
+
+  const patch = buildPatchFromDraft();
+  const patches = state.review.patches.filter((item) => item.patch_id !== patch.patch_id);
+  patches.push(patch);
+
+  try {
+    const { response, body } = await postJson("/api/process-patch", {
+      series: state.manifest.series,
+      chapter: state.manifest.chapter,
+      imagePath: page.image,
+      patch,
+      patches,
+    });
+
+    if (!response.ok) {
+      const message = body?.error || `Patch processing failed (${response.status}).`;
+      if (response.status === 404 || response.status === 501) {
+        throw new Error("Patch API is unavailable. Restart the reader with `python3 scripts/serve_reader.py`.");
+      }
+      throw new Error(message);
+    }
+
+    state.review.patches = body?.patches ?? patches;
+    replaceDraft(body?.patch ?? patch);
+    state.review.needsReload = Boolean(body?.needsReload);
+    const transcript = body?.patch?.user_transcript || body?.ocr?.text || patch.user_transcript;
+    const translation = body?.analysis?.sentence_translation;
+    state.review.statusMessage = translation
+      ? `Patch applied for ${body?.patch?.patch_id}. OCR: ${transcript}. Translation: ${translation}. Reload the page to see it.`
+      : `Patch applied for ${body?.patch?.patch_id}. Reload the page to see it.`;
+    state.review.errorMessage = "";
+    rerenderChapterPreservingScroll();
+  } catch (processError) {
+    state.review.errorMessage = processError.message;
+    state.review.statusMessage = "";
+  } finally {
+    state.review.isProcessing = false;
+    renderReviewPanel();
+  }
+}
+
+function renderReviewPanel() {
+  const pageOptions = state.manifest.pages
+    .map((page) => {
+      const patchCount = getPageReviewPatches(page.id).length;
+      const suffix = patchCount > 0 ? ` (${patchCount} saved)` : "";
+      return `<option value="${escapeHtml(page.id)}" ${page.id === state.review.draft.page_id ? "selected" : ""}>${escapeHtml(page.id)}${suffix}</option>`;
+    })
+    .join("");
+
+  const sentences = state.annotations.get(state.review.draft.page_id)?.sentences ?? [];
+  const anchorMode = draftAnchorMode();
+  const anchorSentenceId = draftAnchorSentenceId();
+  const anchorOptions = sentences
+    .map(
+      (sentence) => `
+        <option value="${escapeHtml(sentence.id)}" ${sentence.id === anchorSentenceId ? "selected" : ""}>
+          ${escapeHtml(sentence.id)} · ${escapeHtml(sentenceLabel(sentence))}
+        </option>
+      `,
+    )
+    .join("");
+
+  const actionSlotMarkup = state.review.isProcessing
+    ? `
+      <div class="review-loading-wrap" aria-live="polite">
+        <span class="review-loading-spinner" aria-hidden="true"></span>
+        <span class="review-loading-text">Processing patch...</span>
+      </div>
+    `
+    : `<button type="button" class="secondary page-review-reload" id="reviewReloadPage">Reload Page</button>`;
+
+  elements.reviewPanel.innerHTML = `
+    <div class="review-header">
+      <div>
+        <h2>OCR Review</h2>
+        <p class="empty">Draw a missing region, trace the text flow, run OCR + patch, then reload the page to inspect the result.</p>
+      </div>
+      <label class="toggle">
+        <input id="reviewModeToggle" type="checkbox" ${state.review.enabled ? "checked" : ""} />
+        <span>Review mode</span>
+      </label>
+    </div>
+    ${state.review.statusMessage ? `<p class="review-feedback success">${escapeHtml(state.review.statusMessage)}</p>` : ""}
+    ${state.review.errorMessage ? `<p class="review-feedback error">${escapeHtml(state.review.errorMessage)}</p>` : ""}
+    <div class="review-grid">
+      <label class="field">
+        <span class="label">Segment</span>
+        <select id="reviewPageSelect">${pageOptions}</select>
+      </label>
+      <label class="field">
+        <span class="label">Text Flow</span>
+        <select id="reviewFlowMode">
+          <option value="vertical_rl" ${state.review.draft.text_flow.mode === "vertical_rl" ? "selected" : ""}>Vertical right-to-left</option>
+          <option value="vertical_lr" ${state.review.draft.text_flow.mode === "vertical_lr" ? "selected" : ""}>Vertical left-to-right</option>
+          <option value="horizontal_ltr" ${state.review.draft.text_flow.mode === "horizontal_ltr" ? "selected" : ""}>Horizontal left-to-right</option>
+          <option value="horizontal_rtl" ${state.review.draft.text_flow.mode === "horizontal_rtl" ? "selected" : ""}>Horizontal right-to-left</option>
+        </select>
+      </label>
+    </div>
+    <div class="review-toolbar">
+      <button type="button" class="${state.review.activeTool === "region" ? "active" : ""}" id="reviewRegionTool">Draw Region</button>
+      <button type="button" class="${state.review.activeTool === "guide" ? "active" : ""}" id="reviewGuideTool">Draw Guide</button>
+      <button type="button" class="secondary" id="reviewUndoPoint">Undo Point</button>
+      <button type="button" class="secondary" id="reviewClearCurrent">Clear Current Tool</button>
+      <button type="button" class="secondary" id="reviewResetDraft">Reset Draft</button>
+    </div>
+    <p class="review-status">${escapeHtml(reviewStatusText())}</p>
+    <label class="field">
+      <span class="label">OCR Candidate</span>
+      <textarea id="reviewOcrCandidate" rows="3" placeholder="Paste the focused OCR result here if you ran it on the crop.">${escapeHtml(state.review.draft.ocr_candidate)}</textarea>
+    </label>
+    <label class="field">
+      <span class="label">Accepted Transcript</span>
+      <textarea id="reviewTranscript" rows="3" placeholder="Confirm or correct the final transcript.">${escapeHtml(state.review.draft.user_transcript)}</textarea>
+    </label>
+    <div class="review-grid">
+      <label class="field">
+        <span class="label">Insert</span>
+        <select id="reviewAnchorMode">
+          <option value="append" ${anchorMode === "append" ? "selected" : ""}>Append at end</option>
+          <option value="after" ${anchorMode === "after" ? "selected" : ""}>After sentence</option>
+          <option value="before" ${anchorMode === "before" ? "selected" : ""}>Before sentence</option>
+        </select>
+      </label>
+      ${anchorMode === "append"
+        ? ""
+        : `
+      <label class="field">
+        <span class="label">Anchor Sentence</span>
+        <select id="reviewAnchorSentence">
+          <option value="">Choose sentence</option>
+          ${anchorOptions}
+        </select>
+      </label>
+      `}
+    </div>
+    <label class="field">
+      <span class="label">Notes</span>
+      <textarea id="reviewNotes" rows="2" placeholder="Optional context for the later Codex run.">${escapeHtml(state.review.draft.notes)}</textarea>
+    </label>
+    <div class="review-toolbar">
+      <button type="button" id="reviewDownloadCrop">Download Crop</button>
+      <button type="button" id="reviewSavePatch">Save Patch</button>
+      <button type="button" id="reviewProcessPatch" ${state.review.isProcessing ? "disabled" : ""}>Run OCR + Patch</button>
+      <button type="button" class="secondary" id="reviewExport">Export Patches JSON</button>
+      <button type="button" class="secondary" id="reviewImport">Import JSON</button>
+    </div>
+    <div class="page-review-actions">
+      ${actionSlotMarkup}
+    </div>
+    <div class="review-list-wrap">
+      <p class="label">Saved Patches</p>
+      ${reviewPatchListMarkup()}
+    </div>
+  `;
+
+  const reviewModeToggle = elements.reviewPanel.querySelector("#reviewModeToggle");
+  const reviewPageSelect = elements.reviewPanel.querySelector("#reviewPageSelect");
+  const reviewFlowMode = elements.reviewPanel.querySelector("#reviewFlowMode");
+  const reviewRegionTool = elements.reviewPanel.querySelector("#reviewRegionTool");
+  const reviewGuideTool = elements.reviewPanel.querySelector("#reviewGuideTool");
+  const reviewUndoPoint = elements.reviewPanel.querySelector("#reviewUndoPoint");
+  const reviewClearCurrent = elements.reviewPanel.querySelector("#reviewClearCurrent");
+  const reviewResetDraft = elements.reviewPanel.querySelector("#reviewResetDraft");
+  const reviewOcrCandidate = elements.reviewPanel.querySelector("#reviewOcrCandidate");
+  const reviewTranscript = elements.reviewPanel.querySelector("#reviewTranscript");
+  const reviewAnchorMode = elements.reviewPanel.querySelector("#reviewAnchorMode");
+  const reviewAnchorSentence = elements.reviewPanel.querySelector("#reviewAnchorSentence");
+  const reviewNotes = elements.reviewPanel.querySelector("#reviewNotes");
+  const reviewDownloadCrop = elements.reviewPanel.querySelector("#reviewDownloadCrop");
+  const reviewSavePatch = elements.reviewPanel.querySelector("#reviewSavePatch");
+  const reviewProcessPatch = elements.reviewPanel.querySelector("#reviewProcessPatch");
+  const reviewExport = elements.reviewPanel.querySelector("#reviewExport");
+  const reviewImport = elements.reviewPanel.querySelector("#reviewImport");
+  const reviewReloadPage = elements.reviewPanel.querySelector("#reviewReloadPage");
+
+  reviewModeToggle.addEventListener("change", (event) => {
+    state.review.enabled = event.target.checked;
+    renderReviewPanel();
+    rerenderChapterPreservingScroll();
+    renderInteractionState();
+  });
+  reviewPageSelect.addEventListener("change", (event) => setDraftPage(event.target.value));
+  reviewFlowMode.addEventListener("change", (event) => updateDraftField("text_flow.mode", event.target.value));
+  reviewRegionTool.addEventListener("click", () => setActiveReviewTool("region"));
+  reviewGuideTool.addEventListener("click", () => setActiveReviewTool("guide"));
+  reviewUndoPoint.addEventListener("click", () => undoDraftPoint(state.review.activeTool));
+  reviewClearCurrent.addEventListener("click", () => clearDraftGeometry(state.review.activeTool));
+  reviewResetDraft.addEventListener("click", () => clearDraftGeometry(null));
+  reviewOcrCandidate.addEventListener("input", (event) => updateDraftField("ocr_candidate", event.target.value));
+  reviewTranscript.addEventListener("input", (event) => updateDraftField("user_transcript", event.target.value));
+  reviewAnchorMode.addEventListener("change", (event) => {
+    const mode = event.target.value;
+    setDraftAnchor(mode, mode === "append" ? "" : draftAnchorSentenceId());
+  });
+  if (reviewAnchorSentence) {
+    reviewAnchorSentence.addEventListener("change", (event) => {
+      setDraftAnchor(reviewAnchorMode.value, event.target.value);
+    });
+  }
+  reviewNotes.addEventListener("input", (event) => updateDraftField("notes", event.target.value));
+  reviewDownloadCrop.addEventListener("click", () => downloadDraftCrop());
+  reviewSavePatch.addEventListener("click", () => saveDraftPatch());
+  reviewProcessPatch.addEventListener("click", () => processDraftPatch());
+  reviewExport.addEventListener("click", () => exportReviewPatches());
+  reviewImport.addEventListener("click", () => elements.reviewImportInput.click());
+  if (reviewReloadPage) {
+    reviewReloadPage.addEventListener("click", async () => {
+      await reloadPageById(state.review.draft.page_id);
+      state.review.needsReload = false;
+      state.review.statusMessage = `Reloaded ${state.review.draft.page_id}.`;
+      renderReviewPanel();
+    });
+  }
+
+  for (const button of elements.reviewPanel.querySelectorAll("[data-review-load]")) {
+    button.addEventListener("click", () => loadPatchIntoDraft(button.dataset.reviewLoad));
+  }
+
+  for (const button of elements.reviewPanel.querySelectorAll("[data-review-delete]")) {
+    button.addEventListener("click", () => deletePatch(button.dataset.reviewDelete));
+  }
+}
+
+function appendReviewOverlays(overlay, pageId) {
+  const reviewLayer = document.createElement("div");
+  reviewLayer.className = "review-layer";
+
+  for (const patch of getPageReviewPatches(pageId)) {
+    if (patch.region?.polygon?.length >= 3) {
+      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      polygon.setAttribute("viewBox", "0 0 1 1");
+      polygon.setAttribute("class", "review-svg");
+      polygon.setAttribute("preserveAspectRatio", "none");
+      polygon.innerHTML = `<polygon class="saved-region" points="${polygonSvgPoints(patch.region.polygon)}"></polygon>`;
+      reviewLayer.appendChild(polygon);
+    }
+
+    if (patch.text_flow?.guide?.length >= 2) {
+      const guide = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      guide.setAttribute("viewBox", "0 0 1 1");
+      guide.setAttribute("class", "review-svg");
+      guide.setAttribute("preserveAspectRatio", "none");
+      guide.innerHTML = `<polyline class="saved-guide" points="${polylineSvgPoints(patch.text_flow.guide)}"></polyline>`;
+      reviewLayer.appendChild(guide);
+    }
+  }
+
+  if (state.review.draft.page_id === pageId) {
+    if (state.review.draft.region.polygon.length >= 1) {
+      const polygon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      polygon.setAttribute("viewBox", "0 0 1 1");
+      polygon.setAttribute("class", "review-svg");
+      polygon.setAttribute("preserveAspectRatio", "none");
+      if (state.review.draft.region.polygon.length >= 3) {
+        polygon.innerHTML = `<polygon class="draft-region" points="${polygonSvgPoints(state.review.draft.region.polygon)}"></polygon>`;
+      } else {
+        polygon.innerHTML = `<polyline class="draft-region-outline" points="${polylineSvgPoints(state.review.draft.region.polygon)}"></polyline>`;
+      }
+      reviewLayer.appendChild(polygon);
+    }
+
+    if (state.review.draft.text_flow.guide.length >= 1) {
+      const guide = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      guide.setAttribute("viewBox", "0 0 1 1");
+      guide.setAttribute("class", "review-svg");
+      guide.setAttribute("preserveAspectRatio", "none");
+      guide.innerHTML = `<polyline class="draft-guide" points="${polylineSvgPoints(state.review.draft.text_flow.guide)}"></polyline>`;
+      reviewLayer.appendChild(guide);
+    }
+
+    for (const point of state.review.draft.region.polygon) {
+      const handle = document.createElement("span");
+      handle.className = "review-point draft";
+      const position = normalizedPointToCss(point);
+      handle.style.left = position.left;
+      handle.style.top = position.top;
+      reviewLayer.appendChild(handle);
+    }
+
+    for (const point of state.review.draft.text_flow.guide) {
+      const handle = document.createElement("span");
+      handle.className = "review-point guide";
+      const position = normalizedPointToCss(point);
+      handle.style.left = position.left;
+      handle.style.top = position.top;
+      reviewLayer.appendChild(handle);
+    }
+  }
+
+  const reviewSurface = document.createElement("button");
+  reviewSurface.type = "button";
+  reviewSurface.className = "review-surface";
+  reviewSurface.dataset.pageId = pageId;
+  reviewSurface.disabled =
+    !state.review.enabled ||
+    !state.review.activeTool;
+  reviewSurface.addEventListener("click", (event) => {
+    if (reviewSurface.disabled) {
+      return;
+    }
+    if (state.review.draft.page_id !== pageId) {
+      state.review.draft = makeEmptyDraft(pageId);
+    }
+    const point = pointerToNormalizedPoint(event, reviewSurface);
+    addDraftPoint(state.review.activeTool, point);
+  });
+
+  overlay.append(reviewLayer, reviewSurface);
+}
+
 function buildPageFrame(page, index) {
   if (!state.annotations.has(page.id)) {
     return null;
@@ -804,10 +1643,19 @@ function buildPageFrame(page, index) {
 
   const header = document.createElement("div");
   header.className = "page-header";
+
+  const savedPatchCount = getPageReviewPatches(page.id).length;
+  const patchBadge = savedPatchCount > 0 ? `<span class="page-badge">${savedPatchCount} patches</span>` : "";
   header.innerHTML = `
-    <p class="page-title">Segment ${index + 1}</p>
-    <span class="page-meta">${page.id}</span>
+    <div>
+      <p class="page-title">Segment ${index + 1}</p>
+      <span class="page-meta">${page.id}</span>
+      ${patchBadge}
+    </div>
+    <button type="button" class="secondary page-review-button">Use For Patch</button>
   `;
+
+  header.querySelector(".page-review-button").addEventListener("click", () => setDraftPage(page.id));
 
   const canvas = document.createElement("div");
   canvas.className = "page-canvas";
@@ -823,6 +1671,16 @@ function buildPageFrame(page, index) {
   const lowlight = document.createElement("div");
   lowlight.className = "page-lowlight";
   overlay.appendChild(lowlight);
+
+  const debugLabel = document.createElement("div");
+  debugLabel.className = "debug-page-label";
+  debugLabel.classList.toggle("visible", state.showDebugPolygons);
+  debugLabel.innerHTML = `
+    <span class="debug-page-label-eyebrow">Segment ${index + 1}</span>
+    <span class="debug-page-label-id">${page.id}</span>
+    <span class="debug-page-label-file">${annotation.sourceImage ?? page.image}</span>
+  `;
+  overlay.appendChild(debugLabel);
 
   const wordFocus = document.createElement("div");
   wordFocus.className = "word-focus";
@@ -873,6 +1731,9 @@ function buildPageFrame(page, index) {
     hotspot.dataset.sentenceKey = sentenceKey(page.id, character.sentenceId);
 
     hotspot.addEventListener("mouseenter", (event) => {
+      if (state.review.enabled) {
+        return;
+      }
       const nextWordKey = wordKey(page.id, character.wordId);
       if (hoverIntentTimer) {
         clearTimeout(hoverIntentTimer);
@@ -890,6 +1751,9 @@ function buildPageFrame(page, index) {
     });
 
     hotspot.addEventListener("mouseleave", () => {
+      if (state.review.enabled) {
+        return;
+      }
       if (hoverIntentTimer) {
         clearTimeout(hoverIntentTimer);
         hoverIntentTimer = null;
@@ -905,6 +1769,9 @@ function buildPageFrame(page, index) {
     hotspot.addEventListener("click", () => {
       const sentence = sentenceById.get(character.sentenceId);
       selectDebugPage(page.id);
+      if (state.review.enabled) {
+        return;
+      }
       state.hoveredWordKey = wordKey(page.id, character.wordId);
       state.activeSentenceKey = sentenceKey(page.id, character.sentenceId);
       hideHoverTooltip();
@@ -923,8 +1790,9 @@ function buildPageFrame(page, index) {
     });
 
     overlay.appendChild(hotspot);
-
   }
+
+  appendReviewOverlays(overlay, page.id);
 
   canvas.append(image, overlay);
   frame.append(header, canvas);
@@ -959,6 +1827,8 @@ async function init() {
     wordPanel: document.querySelector("#wordPanel"),
     sentencePanel: document.querySelector("#sentencePanel"),
     pageReviewPanel: document.querySelector("#pageReviewPanel"),
+    reviewPanel: document.querySelector("#reviewPanel"),
+    reviewImportInput: document.querySelector("#reviewImportInput"),
     debugToggle: document.querySelector("#debugToggle"),
     hoverTooltip: document.querySelector("#hoverTooltip"),
   };
@@ -970,6 +1840,17 @@ async function init() {
   }
 
   state.manifest = await loadJson(manifestUrl);
+  state.review.storageKey = `ocr-review:${state.manifest.series}:${state.manifest.chapter}`;
+  loadReviewStateFromStorage();
+  if (!state.review.draft.page_id) {
+    state.review.draft.page_id = state.manifest.pages[0]?.id ?? "";
+  }
+
+  elements.reviewImportInput.addEventListener("change", (event) => {
+    handleReviewImport(event.target.files?.[0] ?? null);
+    event.target.value = "";
+  });
+
   elements.debugToggle.addEventListener("change", (event) => {
     state.showDebugPolygons = event.target.checked;
     rerenderChapterPreservingScroll();
@@ -978,18 +1859,22 @@ async function init() {
     renderInteractionState();
   });
   document.addEventListener("click", (event) => {
-    const clickedHotspot = event.target.closest(".hotspot");
-    const clickedToggle = event.target.closest(".debug-corner-toggle");
-    const clickedReviewPanel = event.target.closest("#pageReviewPanel");
-    if (!clickedHotspot && !clickedToggle && !clickedReviewPanel) {
+    const target = event.target instanceof Element ? event.target : null;
+    const clickedHotspot = target?.closest(".hotspot");
+    const clickedToggle = target?.closest(".debug-corner-toggle");
+    const clickedPageReview = target?.closest("#pageReviewPanel");
+    const clickedReview = target?.closest(".review-panel");
+    if (!clickedHotspot && !clickedToggle && !clickedPageReview && !clickedReview) {
       clearInteractionState();
     }
   });
+
   renderEmptyPanels();
   renderEmptyPageReviewPanel();
   renderChapterPanel();
   await loadEnrichment();
   await loadAnnotations();
+  renderReviewPanel();
   renderChapter();
   renderInteractionState();
 }
