@@ -121,9 +121,10 @@ def region_thickness(polygon: list[Point], flow_mode: str) -> float:
     ys = [point.y for point in polygon]
     width = max(xs) - min(xs) if xs else 0.05
     height = max(ys) - min(ys) if ys else 0.05
-    if flow_mode.startswith("vertical"):
-        return max(width * 0.8, 0.02)
-    return max(height * 0.8, 0.02)
+    # Use the smaller region axis as the text thickness. This keeps patched
+    # character geometry close to the user-drawn OCR region instead of
+    # exploding when a shallow region is marked with a vertical flow mode.
+    return max(min(width, height) * 0.8, 0.002)
 
 
 def build_character_polygons(patch: MissingRegionPatch, text: str) -> list[dict[str, object]]:
