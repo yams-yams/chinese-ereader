@@ -14,6 +14,14 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 from paddleocr import PaddleOCR
 
 
+SIZE_WIDTH_REFERENCE_PX = 30.0
+SIZE_HEIGHT_REFERENCE_PX = 12.0
+SIZE_AREA_REFERENCE_PX = 360.0
+EDGE_REFERENCE_PX = 24.0
+NEIGHBORHOOD_REFERENCE_PX = 160.0
+ISOLATION_REFERENCE_PX = 160.0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Run PaddleOCR over processed chapter pages.")
     parser.add_argument("--input", required=True, help="Directory with page PNGs.")
@@ -81,6 +89,135 @@ def polygon_to_box(polygon, page_width, page_height):
     return normalize_box(left, top, width, height, page_width, page_height)
 
 
+def pixel_bounds_for_polygon(polygon):
+    xs = [float(point[0]) for point in polygon]
+    ys = [float(point[1]) for point in polygon]
+    left = float(min(xs))
+    top = float(min(ys))
+    width = float(max(xs) - left)
+    height = float(max(ys) - top)
+    return {
+        "x": left,
+        "y": top,
+        "width": width,
+        "height": height,
+        "area": float(width * height),
+    }
+
+
+def polygon_center_px(polygon):
+    bounds = pixel_bounds_for_polygon(polygon)
+    return (
+        bounds["x"] + (bounds["width"] / 2.0),
+        bounds["y"] + (bounds["height"] / 2.0),
+    )
+
+
+def clamp_score(value):
+    return max(0.0, min(1.0, value))
+
+
+def size_score(bounds):
+    width_score = clamp_score(bounds["width"] / SIZE_WIDTH_REFERENCE_PX)
+    height_score = clamp_score(bounds["height"] / SIZE_HEIGHT_REFERENCE_PX)
+    area_score = clamp_score(bounds["area"] / SIZE_AREA_REFERENCE_PX)
+    return clamp_score((width_score * 0.4) + (height_score * 0.4) + (area_score * 0.2))
+
+
+def edge_score(bounds, page_width, page_height):
+    min_edge_distance = min(
+        bounds["x"],
+        bounds["y"],
+        max(page_width - (bounds["x"] + bounds["width"]), 0.0),
+        max(page_height - (bounds["y"] + bounds["height"]), 0.0),
+    )
+    return clamp_score(min_edge_distance / EDGE_REFERENCE_PX)
+
+
+def neighborhood_score(index, centers):
+    if len(centers) <= 1:
+        return 0.0
+
+    current_x, current_y = centers[index]
+    nearest_distance = min(
+        (
+            ((current_x - other_x) ** 2 + (current_y - other_y) ** 2) ** 0.5
+            for other_index, (other_x, other_y) in enumerate(centers)
+            if other_index != index
+        ),
+        default=NEIGHBORHOOD_REFERENCE_PX,
+    )
+    return clamp_score(1.0 - (nearest_distance / NEIGHBORHOOD_REFERENCE_PX))
+
+
+def nearest_neighbor_distance(index, centers):
+    if len(centers) <= 1:
+        return None
+
+    current_x, current_y = centers[index]
+    return min(
+        (
+            ((current_x - other_x) ** 2 + (current_y - other_y) ** 2) ** 0.5
+            for other_index, (other_x, other_y) in enumerate(centers)
+            if other_index != index
+        ),
+        default=None,
+    )
+
+
+def quality_score(recognition_confidence, bounds, page_width, page_height, nearest_distance):
+    geometry_size_score = size_score(bounds)
+    min_edge_distance = min(
+        bounds["x"],
+        bounds["y"],
+        max(page_width - (bounds["x"] + bounds["width"]), 0.0),
+        max(page_height - (bounds["y"] + bounds["height"]), 0.0),
+    )
+    is_tiny = (
+        bounds["width"] < SIZE_WIDTH_REFERENCE_PX
+        or bounds["height"] < SIZE_HEIGHT_REFERENCE_PX
+        or bounds["area"] < SIZE_AREA_REFERENCE_PX
+    )
+    edge_penalty = 0.0
+    if is_tiny and min_edge_distance < EDGE_REFERENCE_PX:
+        edge_penalty = clamp_score((EDGE_REFERENCE_PX - min_edge_distance) / EDGE_REFERENCE_PX) * 0.12
+
+    isolation_penalty = 0.0
+    if is_tiny and nearest_distance is not None and nearest_distance > ISOLATION_REFERENCE_PX:
+        isolation_penalty = (
+            clamp_score((nearest_distance - ISOLATION_REFERENCE_PX) / ISOLATION_REFERENCE_PX) * 0.08
+        )
+
+    score = recognition_confidence * 0.75 + geometry_size_score * 0.25 - edge_penalty - isolation_penalty
+    return clamp_score(score), {
+        "ocrConfidence": round(recognition_confidence, 4),
+        "sizeScore": round(geometry_size_score, 4),
+        "edgePenalty": round(edge_penalty, 4),
+        "isolationPenalty": round(isolation_penalty, 4),
+        "nearestNeighborDistancePx": round(nearest_distance, 2) if nearest_distance is not None else None,
+    }
+
+
+def geometry_flags(bounds, page_width, page_height):
+    flags = []
+    if bounds["width"] < SIZE_WIDTH_REFERENCE_PX:
+        flags.append("narrow")
+    if bounds["height"] < SIZE_HEIGHT_REFERENCE_PX:
+        flags.append("short")
+    if bounds["area"] < SIZE_AREA_REFERENCE_PX:
+        flags.append("small-area")
+
+    min_edge_distance = min(
+        bounds["x"],
+        bounds["y"],
+        max(page_width - (bounds["x"] + bounds["width"]), 0.0),
+        max(page_height - (bounds["y"] + bounds["height"]), 0.0),
+    )
+    if min_edge_distance < EDGE_REFERENCE_PX:
+        flags.append("edge-adjacent")
+    return flags
+
+
 def build_annotation(result, page_path: Path, min_confidence: float):
     input_img = result["doc_preprocessor_res"]["output_img"]
     page_height, page_width = input_img.shape[:2]
@@ -97,6 +234,7 @@ def build_annotation(result, page_path: Path, min_confidence: float):
     rec_polys = result.get("rec_polys", [])
     text_words = result.get("text_word", [])
     text_word_regions = result.get("text_word_region", [])
+    kept_sentence_meta = []
 
     for line_index, text in enumerate(rec_texts):
         confidence = rec_scores[line_index]
@@ -109,9 +247,29 @@ def build_annotation(result, page_path: Path, min_confidence: float):
             (page_width, page_height),
             (0, page_height),
         ]
+        sentence_polygon = normalize_polygon(
+            rec_polys[line_index] if line_index < len(rec_polys) else fallback_poly,
+            page_width,
+            page_height,
+        )
+        sentence_pixel_bounds = pixel_bounds_for_polygon(
+            rec_polys[line_index] if line_index < len(rec_polys) else fallback_poly
+        )
         sentence_id = f"sentence-{sentence_counter:04d}"
         sentence_counter += 1
         sentence_character_ids = []
+        kept_sentence_meta.append(
+            {
+                "id": sentence_id,
+                "text": text,
+                "confidence": confidence,
+                "pixelBounds": sentence_pixel_bounds,
+                "center": polygon_center_px(
+                    rec_polys[line_index] if line_index < len(rec_polys) else fallback_poly
+                ),
+                "polygon": sentence_polygon,
+            }
+        )
 
         word_tokens = text_words[line_index] if line_index < len(text_words) else []
         word_regions = (
@@ -129,12 +287,15 @@ def build_annotation(result, page_path: Path, min_confidence: float):
 
                 character_id = f"char-{character_counter:04d}"
                 character_counter += 1
+                token_pixel_bounds = pixel_bounds_for_polygon(token_region)
                 characters.append(
                     {
                         "id": character_id,
                         "text": token_text,
                         "box": polygon_to_box(token_region, page_width, page_height),
                         "polygon": normalize_polygon(token_region, page_width, page_height),
+                        "pixelBox": {key: round(value, 2) for key, value in token_pixel_bounds.items()},
+                        "ocrConfidence": round(confidence, 4),
                         "wordId": word_id,
                         "sentenceId": sentence_id,
                     }
@@ -149,6 +310,8 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                         "translation": None,
                         "characterIds": [character_id],
                         "polygon": normalize_polygon(token_region, page_width, page_height),
+                        "pixelBox": {key: round(value, 2) for key, value in token_pixel_bounds.items()},
+                        "ocrConfidence": round(confidence, 4),
                     }
                 )
         else:
@@ -156,6 +319,7 @@ def build_annotation(result, page_path: Path, min_confidence: float):
             word_counter += 1
             character_id = f"char-{character_counter:04d}"
             character_counter += 1
+            fallback_pixel_bounds = pixel_bounds_for_polygon(fallback_poly)
 
             characters.append(
                 {
@@ -163,6 +327,8 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                     "text": text,
                     "box": polygon_to_box(fallback_poly, page_width, page_height),
                     "polygon": normalize_polygon(fallback_poly, page_width, page_height),
+                    "pixelBox": {key: round(value, 2) for key, value in fallback_pixel_bounds.items()},
+                    "ocrConfidence": round(confidence, 4),
                     "wordId": word_id,
                     "sentenceId": sentence_id,
                 }
@@ -176,6 +342,8 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                     "translation": None,
                     "characterIds": [character_id],
                     "polygon": normalize_polygon(fallback_poly, page_width, page_height),
+                    "pixelBox": {key: round(value, 2) for key, value in fallback_pixel_bounds.items()},
+                    "ocrConfidence": round(confidence, 4),
                 }
             )
 
@@ -186,19 +354,48 @@ def build_annotation(result, page_path: Path, min_confidence: float):
                 "pinyin": "",
                 "translation": None,
                 "characterIds": sentence_character_ids,
-                "polygon": normalize_polygon(
-                    rec_polys[line_index] if line_index < len(rec_polys) else fallback_poly,
-                    page_width,
-                    page_height,
-                ),
+                "polygon": sentence_polygon,
             }
         )
+
+    sentence_index = {sentence["id"]: sentence for sentence in sentences}
+    centers = [meta["center"] for meta in kept_sentence_meta]
+    sentence_scores = []
+    for index, meta in enumerate(kept_sentence_meta):
+        nearest_distance = nearest_neighbor_distance(index, centers)
+        score, breakdown = quality_score(
+            meta["confidence"],
+            meta["pixelBounds"],
+            page_width,
+            page_height,
+            nearest_distance,
+        )
+        sentence = sentence_index[meta["id"]]
+        sentence["pixelBox"] = {key: round(value, 2) for key, value in meta["pixelBounds"].items()}
+        sentence["ocrConfidence"] = round(meta["confidence"], 4)
+        sentence["qualityScore"] = round(score, 4)
+        sentence["scoreBreakdown"] = breakdown
+        sentence["flags"] = geometry_flags(meta["pixelBounds"], page_width, page_height)
+        if nearest_distance is not None and nearest_distance > ISOLATION_REFERENCE_PX:
+            sentence["flags"] = [*sentence["flags"], "isolated"]
+        sentence_scores.append(score)
 
     return {
         "sourceImage": page_path.name,
         "imageSize": {
             "width": page_width,
             "height": page_height,
+        },
+        "qualitySummary": {
+            "sentenceCount": len(sentences),
+            "averageSentenceQualityScore": round(sum(sentence_scores) / len(sentence_scores), 4)
+            if sentence_scores
+            else None,
+            "averageSentenceOcrConfidence": round(
+                sum(meta["confidence"] for meta in kept_sentence_meta) / len(kept_sentence_meta), 4
+            )
+            if kept_sentence_meta
+            else None,
         },
         "characters": characters,
         "words": words,

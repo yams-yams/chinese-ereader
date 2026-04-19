@@ -150,7 +150,7 @@ Print the expected JSON schema by itself:
 Serve the reader locally:
 
 ```bash
-python3 scripts/serve_reader.py
+.venv/bin/python scripts/serve_reader.py
 ```
 
 Then open:

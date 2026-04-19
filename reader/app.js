@@ -19,6 +19,11 @@ const state = {
     storageKey: null,
     patches: [],
     draft: makeEmptyDraft(),
+    anchorMode: "append",
+    isProcessing: false,
+    statusMessage: "",
+    errorMessage: "",
+    needsReload: false,
   },
 };
 
@@ -51,6 +56,25 @@ async function loadJson(url) {
     return null;
   }
   return response.json();
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  let body = null;
+  try {
+    body = await response.json();
+  } catch (error) {
+    body = null;
+  }
+
+  return { response, body };
 }
 
 function escapeHtml(value) {
@@ -395,7 +419,15 @@ async function reloadSelectedDebugPage() {
     return;
   }
 
-  const page = pageEntry(state.selectedDebugPageId);
+  await reloadPageById(state.selectedDebugPageId);
+}
+
+async function reloadPageById(pageId) {
+  if (!pageId) {
+    return;
+  }
+
+  const page = pageEntry(pageId);
   if (page) {
     const rawAnnotation =
       (await loadJson(imagePath(page.annotation))) ?? {
@@ -406,8 +438,8 @@ async function reloadSelectedDebugPage() {
       };
     state.rawAnnotations.set(page.id, rawAnnotation);
   }
-  state.deletedSentenceIdsByPage.delete(state.selectedDebugPageId);
-  rebuildAnnotation(state.selectedDebugPageId);
+  state.deletedSentenceIdsByPage.delete(pageId);
+  rebuildAnnotation(pageId);
   rerenderChapterPreservingScroll();
   refreshPanelsFromSelection();
   renderPageReviewPanel();
@@ -830,7 +862,7 @@ function normalizedPointToCss(point) {
 
 function polygonSvgPoints(points) {
   return points
-    .map((point) => `${(point.x * 100).toFixed(3)},${((1 - point.y) * 100).toFixed(3)}`)
+    .map((point) => `${point.x.toFixed(6)},${(1 - point.y).toFixed(6)}`)
     .join(" ");
 }
 
@@ -872,6 +904,7 @@ function reviewStoragePayload() {
   return {
     patches: state.review.patches,
     draft: state.review.draft,
+    anchorMode: state.review.anchorMode,
   };
 }
 
@@ -897,6 +930,7 @@ function loadReviewStateFromStorage() {
     const parsed = JSON.parse(raw);
     state.review.patches = Array.isArray(parsed.patches) ? parsed.patches : [];
     state.review.draft = parsed.draft ? parsed.draft : makeEmptyDraft(state.manifest.pages[0]?.id ?? "");
+    state.review.anchorMode = parsed.anchorMode || inferAnchorMode(state.review.draft);
   } catch (error) {
     console.warn("Failed to restore review state", error);
   }
@@ -918,6 +952,7 @@ function replaceDraft(nextDraft) {
       insert_before_sentence_id: nextDraft.anchor?.insert_before_sentence_id ?? "",
     },
   };
+  state.review.anchorMode = inferAnchorMode(state.review.draft);
   persistReviewState();
   renderReviewPanel();
 }
@@ -983,13 +1018,24 @@ function updateDraftField(field, value) {
   persistReviewState();
 }
 
-function setDraftAnchor(mode, sentenceId) {
+function inferAnchorMode(draft) {
+  if (draft.anchor?.insert_after_sentence_id) {
+    return "after";
+  }
+  if (draft.anchor?.insert_before_sentence_id) {
+    return "before";
+  }
+  return "append";
+}
+
+function setDraftAnchor(mode, sentenceId = "") {
+  state.review.anchorMode = mode;
   state.review.draft.anchor.insert_after_sentence_id = "";
   state.review.draft.anchor.insert_before_sentence_id = "";
-  if (mode === "after") {
+  if (mode === "after" && sentenceId) {
     state.review.draft.anchor.insert_after_sentence_id = sentenceId;
   }
-  if (mode === "before") {
+  if (mode === "before" && sentenceId) {
     state.review.draft.anchor.insert_before_sentence_id = sentenceId;
   }
   persistReviewState();
@@ -997,13 +1043,7 @@ function setDraftAnchor(mode, sentenceId) {
 }
 
 function draftAnchorMode() {
-  if (state.review.draft.anchor.insert_after_sentence_id) {
-    return "after";
-  }
-  if (state.review.draft.anchor.insert_before_sentence_id) {
-    return "before";
-  }
-  return "append";
+  return state.review.anchorMode || inferAnchorMode(state.review.draft);
 }
 
 function draftAnchorSentenceId() {
@@ -1024,21 +1064,12 @@ function validateDraft() {
   if (state.review.draft.text_flow.guide.length < 2) {
     return "Draw at least 2 points for the text-flow guide.";
   }
-  if (!state.review.draft.user_transcript.trim()) {
-    return "Confirm or enter the accepted transcript.";
-  }
   return null;
 }
 
-function saveDraftPatch() {
-  const error = validateDraft();
-  if (error) {
-    window.alert(error);
-    return;
-  }
-
+function buildPatchFromDraft() {
   const patchId = state.review.draft.patch_id || nextPatchId();
-  const patch = {
+  return {
     patch_id: patchId,
     page_id: state.review.draft.page_id,
     kind: "missing_region",
@@ -1057,7 +1088,17 @@ function saveDraftPatch() {
     },
     notes: state.review.draft.notes.trim(),
   };
+}
 
+function saveDraftPatch() {
+  const error = validateDraft();
+  if (error) {
+    window.alert(error);
+    return;
+  }
+
+  const patch = buildPatchFromDraft();
+  const patchId = patch.patch_id;
   const existingIndex = state.review.patches.findIndex((item) => item.patch_id === patchId);
   if (existingIndex >= 0) {
     state.review.patches.splice(existingIndex, 1, patch);
@@ -1065,6 +1106,8 @@ function saveDraftPatch() {
     state.review.patches.push(patch);
   }
 
+  state.review.statusMessage = `Saved ${patchId}.`;
+  state.review.errorMessage = "";
   state.review.draft = makeEmptyDraft(state.review.draft.page_id);
   persistReviewState();
   renderReviewPanel();
@@ -1251,6 +1294,64 @@ function reviewPatchListMarkup() {
   `;
 }
 
+async function processDraftPatch() {
+  const error = validateDraft();
+  if (error) {
+    window.alert(error);
+    return;
+  }
+
+  const page = pageEntry(state.review.draft.page_id);
+  if (!page) {
+    window.alert("Could not find the selected page.");
+    return;
+  }
+
+  state.review.isProcessing = true;
+  state.review.errorMessage = "";
+  state.review.statusMessage = "Running OCR and patch pipeline...";
+  renderReviewPanel();
+
+  const patch = buildPatchFromDraft();
+  const patches = state.review.patches.filter((item) => item.patch_id !== patch.patch_id);
+  patches.push(patch);
+
+  try {
+    const { response, body } = await postJson("/api/process-patch", {
+      series: state.manifest.series,
+      chapter: state.manifest.chapter,
+      imagePath: page.image,
+      patch,
+      patches,
+    });
+
+    if (!response.ok) {
+      const message = body?.error || `Patch processing failed (${response.status}).`;
+      if (response.status === 404 || response.status === 501) {
+        throw new Error("Patch API is unavailable. Restart the reader with `python3 scripts/serve_reader.py`.");
+      }
+      throw new Error(message);
+    }
+
+    state.review.patches = body?.patches ?? patches;
+    replaceDraft(body?.patch ?? patch);
+    state.review.needsReload = Boolean(body?.needsReload);
+    const transcript = body?.patch?.user_transcript || body?.ocr?.text || patch.user_transcript;
+    const translation = body?.analysis?.sentence_translation;
+    state.review.statusMessage = translation
+      ? `Patch applied for ${body?.patch?.patch_id}. OCR: ${transcript}. Translation: ${translation}. Reload the page to see it.`
+      : `Patch applied for ${body?.patch?.patch_id}. Reload the page to see it.`;
+    state.review.errorMessage = "";
+    rerenderChapterPreservingScroll();
+  } catch (processError) {
+    state.review.errorMessage = processError.message;
+    state.review.statusMessage = "";
+  } finally {
+    state.review.isProcessing = false;
+    renderReviewPanel();
+  }
+}
+
 function renderReviewPanel() {
   const pageOptions = state.manifest.pages
     .map((page) => {
@@ -1273,17 +1374,28 @@ function renderReviewPanel() {
     )
     .join("");
 
+  const actionSlotMarkup = state.review.isProcessing
+    ? `
+      <div class="review-loading-wrap" aria-live="polite">
+        <span class="review-loading-spinner" aria-hidden="true"></span>
+        <span class="review-loading-text">Processing patch...</span>
+      </div>
+    `
+    : `<button type="button" class="secondary page-review-reload" id="reviewReloadPage">Reload Page</button>`;
+
   elements.reviewPanel.innerHTML = `
     <div class="review-header">
       <div>
         <h2>OCR Review</h2>
-        <p class="empty">Draw a missing region, trace the text flow, then export the saved patches JSON.</p>
+        <p class="empty">Draw a missing region, trace the text flow, run OCR + patch, then reload the page to inspect the result.</p>
       </div>
       <label class="toggle">
         <input id="reviewModeToggle" type="checkbox" ${state.review.enabled ? "checked" : ""} />
         <span>Review mode</span>
       </label>
     </div>
+    ${state.review.statusMessage ? `<p class="review-feedback success">${escapeHtml(state.review.statusMessage)}</p>` : ""}
+    ${state.review.errorMessage ? `<p class="review-feedback error">${escapeHtml(state.review.errorMessage)}</p>` : ""}
     <div class="review-grid">
       <label class="field">
         <span class="label">Segment</span>
@@ -1324,13 +1436,17 @@ function renderReviewPanel() {
           <option value="before" ${anchorMode === "before" ? "selected" : ""}>Before sentence</option>
         </select>
       </label>
+      ${anchorMode === "append"
+        ? ""
+        : `
       <label class="field">
         <span class="label">Anchor Sentence</span>
-        <select id="reviewAnchorSentence" ${anchorMode === "append" ? "disabled" : ""}>
+        <select id="reviewAnchorSentence">
           <option value="">Choose sentence</option>
           ${anchorOptions}
         </select>
       </label>
+      `}
     </div>
     <label class="field">
       <span class="label">Notes</span>
@@ -1339,8 +1455,12 @@ function renderReviewPanel() {
     <div class="review-toolbar">
       <button type="button" id="reviewDownloadCrop">Download Crop</button>
       <button type="button" id="reviewSavePatch">Save Patch</button>
+      <button type="button" id="reviewProcessPatch" ${state.review.isProcessing ? "disabled" : ""}>Run OCR + Patch</button>
       <button type="button" class="secondary" id="reviewExport">Export Patches JSON</button>
       <button type="button" class="secondary" id="reviewImport">Import JSON</button>
+    </div>
+    <div class="page-review-actions">
+      ${actionSlotMarkup}
     </div>
     <div class="review-list-wrap">
       <p class="label">Saved Patches</p>
@@ -1363,8 +1483,10 @@ function renderReviewPanel() {
   const reviewNotes = elements.reviewPanel.querySelector("#reviewNotes");
   const reviewDownloadCrop = elements.reviewPanel.querySelector("#reviewDownloadCrop");
   const reviewSavePatch = elements.reviewPanel.querySelector("#reviewSavePatch");
+  const reviewProcessPatch = elements.reviewPanel.querySelector("#reviewProcessPatch");
   const reviewExport = elements.reviewPanel.querySelector("#reviewExport");
   const reviewImport = elements.reviewPanel.querySelector("#reviewImport");
+  const reviewReloadPage = elements.reviewPanel.querySelector("#reviewReloadPage");
 
   reviewModeToggle.addEventListener("change", (event) => {
     state.review.enabled = event.target.checked;
@@ -1382,16 +1504,28 @@ function renderReviewPanel() {
   reviewOcrCandidate.addEventListener("input", (event) => updateDraftField("ocr_candidate", event.target.value));
   reviewTranscript.addEventListener("input", (event) => updateDraftField("user_transcript", event.target.value));
   reviewAnchorMode.addEventListener("change", (event) => {
-    setDraftAnchor(event.target.value, reviewAnchorSentence.value);
+    const mode = event.target.value;
+    setDraftAnchor(mode, mode === "append" ? "" : draftAnchorSentenceId());
   });
-  reviewAnchorSentence.addEventListener("change", (event) => {
-    setDraftAnchor(reviewAnchorMode.value, event.target.value);
-  });
+  if (reviewAnchorSentence) {
+    reviewAnchorSentence.addEventListener("change", (event) => {
+      setDraftAnchor(reviewAnchorMode.value, event.target.value);
+    });
+  }
   reviewNotes.addEventListener("input", (event) => updateDraftField("notes", event.target.value));
   reviewDownloadCrop.addEventListener("click", () => downloadDraftCrop());
   reviewSavePatch.addEventListener("click", () => saveDraftPatch());
+  reviewProcessPatch.addEventListener("click", () => processDraftPatch());
   reviewExport.addEventListener("click", () => exportReviewPatches());
   reviewImport.addEventListener("click", () => elements.reviewImportInput.click());
+  if (reviewReloadPage) {
+    reviewReloadPage.addEventListener("click", async () => {
+      await reloadPageById(state.review.draft.page_id);
+      state.review.needsReload = false;
+      state.review.statusMessage = `Reloaded ${state.review.draft.page_id}.`;
+      renderReviewPanel();
+    });
+  }
 
   for (const button of elements.reviewPanel.querySelectorAll("[data-review-load]")) {
     button.addEventListener("click", () => loadPatchIntoDraft(button.dataset.reviewLoad));
@@ -1409,7 +1543,7 @@ function appendReviewOverlays(overlay, pageId) {
   for (const patch of getPageReviewPatches(pageId)) {
     if (patch.region?.polygon?.length >= 3) {
       const polygon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      polygon.setAttribute("viewBox", "0 0 100 100");
+      polygon.setAttribute("viewBox", "0 0 1 1");
       polygon.setAttribute("class", "review-svg");
       polygon.setAttribute("preserveAspectRatio", "none");
       polygon.innerHTML = `<polygon class="saved-region" points="${polygonSvgPoints(patch.region.polygon)}"></polygon>`;
@@ -1418,7 +1552,7 @@ function appendReviewOverlays(overlay, pageId) {
 
     if (patch.text_flow?.guide?.length >= 2) {
       const guide = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      guide.setAttribute("viewBox", "0 0 100 100");
+      guide.setAttribute("viewBox", "0 0 1 1");
       guide.setAttribute("class", "review-svg");
       guide.setAttribute("preserveAspectRatio", "none");
       guide.innerHTML = `<polyline class="saved-guide" points="${polylineSvgPoints(patch.text_flow.guide)}"></polyline>`;
@@ -1429,7 +1563,7 @@ function appendReviewOverlays(overlay, pageId) {
   if (state.review.draft.page_id === pageId) {
     if (state.review.draft.region.polygon.length >= 1) {
       const polygon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      polygon.setAttribute("viewBox", "0 0 100 100");
+      polygon.setAttribute("viewBox", "0 0 1 1");
       polygon.setAttribute("class", "review-svg");
       polygon.setAttribute("preserveAspectRatio", "none");
       if (state.review.draft.region.polygon.length >= 3) {
@@ -1442,7 +1576,7 @@ function appendReviewOverlays(overlay, pageId) {
 
     if (state.review.draft.text_flow.guide.length >= 1) {
       const guide = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      guide.setAttribute("viewBox", "0 0 100 100");
+      guide.setAttribute("viewBox", "0 0 1 1");
       guide.setAttribute("class", "review-svg");
       guide.setAttribute("preserveAspectRatio", "none");
       guide.innerHTML = `<polyline class="draft-guide" points="${polylineSvgPoints(state.review.draft.text_flow.guide)}"></polyline>`;
