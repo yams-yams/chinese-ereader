@@ -89,6 +89,41 @@ def main() -> None:
         help="Pixels of horizontal margin to preserve on both sides after ratio-based trimming.",
     )
     parser.add_argument(
+        "--max-segment-height",
+        type=int,
+        default=3500,
+        help="Maximum merged page height to target before OCR.",
+    )
+    parser.add_argument(
+        "--oversized-split-min-gap",
+        type=int,
+        default=50,
+        help="Fallback gap threshold for splitting oversized segments on a second pass.",
+    )
+    parser.add_argument(
+        "--tiny-fragment-height",
+        type=int,
+        default=200,
+        help="Try to absorb segments shorter than this before the regular recombine pass.",
+    )
+    parser.add_argument(
+        "--tiny-merge-max-height",
+        type=int,
+        default=3300,
+        help="Maximum merged page height allowed when rescuing tiny fragments.",
+    )
+    parser.add_argument(
+        "--recombine-short-height",
+        type=int,
+        default=1500,
+        help="Merge adjacent splits when either side is shorter than this and the merged result stays under the regular height cap.",
+    )
+    parser.add_argument(
+        "--disable-recombine",
+        action="store_true",
+        help="Skip both the tiny-fragment rescue pass and the regular recombine pass.",
+    )
+    parser.add_argument(
         "--ocr-lang",
         default="ch",
         help="PaddleOCR language code used by the Python OCR stage.",
@@ -127,28 +162,39 @@ def main() -> None:
     clear_generated_files(pages_dir, ".png")
     clear_generated_files(annotations_dir, ".json")
 
-    run(
-        [
-            "swift",
-            "-module-cache-path",
-            str(SWIFT_CACHE),
-            str(SPLITTER),
-            "--input",
-            str(raw_dir),
-            "--output",
-            str(pages_dir),
-            "--min-gap",
-            str(args.min_gap),
-            "--white-threshold",
-            str(args.white_threshold),
-            "--crop-left-ratio",
-            str(args.crop_left_ratio),
-            "--crop-right-ratio",
-            str(args.crop_right_ratio),
-            "--horizontal-margin-px",
-            str(args.horizontal_margin_px),
-        ]
-    )
+    split_cmd = [
+        "swift",
+        "-module-cache-path",
+        str(SWIFT_CACHE),
+        str(SPLITTER),
+        "--input",
+        str(raw_dir),
+        "--output",
+        str(pages_dir),
+        "--min-gap",
+        str(args.min_gap),
+        "--white-threshold",
+        str(args.white_threshold),
+        "--crop-left-ratio",
+        str(args.crop_left_ratio),
+        "--crop-right-ratio",
+        str(args.crop_right_ratio),
+        "--horizontal-margin-px",
+        str(args.horizontal_margin_px),
+        "--max-segment-height",
+        str(args.max_segment_height),
+        "--oversized-split-min-gap",
+        str(args.oversized_split_min_gap),
+        "--tiny-fragment-height",
+        str(args.tiny_fragment_height),
+        "--tiny-merge-max-height",
+        str(args.tiny_merge_max_height),
+        "--recombine-short-height",
+        str(args.recombine_short_height),
+    ]
+    if args.disable_recombine:
+        split_cmd.append("--disable-recombine")
+    run(split_cmd)
     ocr_cmd = [
         str(VENV_PYTHON if VENV_PYTHON.exists() else "python3"),
         str(OCR),

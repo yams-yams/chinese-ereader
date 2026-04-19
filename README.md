@@ -17,7 +17,7 @@ Given a chapter capture from Bilibili Manga:
 
 ### Phase 1: Ingest chapter captures
 
-- Save the stitched chapter screenshots from the browser extension into `data/raw/`.
+- Save the raw chapter screenshots or parts from the browser extension into `data/raw/`.
 - Split each long screenshot into page candidates.
 - Review and fix page boundaries when needed.
 
@@ -99,7 +99,15 @@ Process a chapter with the current recommended horizontal trim for the Bilibili 
 python3 scripts/process_chapter.py --series renjian-bailijin --chapter chapter-001 --crop-left-ratio 0.26 --crop-right-ratio 0.26
 ```
 
-That command also keeps a small horizontal safety margin by default (`48px` on each side). You can tune it with `--horizontal-margin-px`.
+That command stitches the raw chapter parts in sorted capture order before split detection. It also keeps a small horizontal safety margin by default (`48px` on each side). You can tune it with `--horizontal-margin-px`.
+
+Compare several split `minGap` values before running OCR:
+
+```bash
+python3 scripts/evaluate_split_gaps.py --series renjian-bailijin --chapter chapter-001 --crop-left-ratio 0.26 --crop-right-ratio 0.26 --min-gaps 40 60 80 100 120
+```
+
+The sweep writes page images for each candidate under `tmp/split-gap-eval/` and saves a `summary.json` with page-count and height statistics so you can compare oversized vs over-split results quickly. By default it first tries to absorb tiny fragments under `--tiny-fragment-height` using a higher rescue cap (`--tiny-merge-max-height`), then runs a regular recombine pass that merges adjacent short segments when the combined height stays under `--max-segment-height`. Add `--disable-recombine` if you want to inspect split output before either recombine pass runs.
 
 The first PaddleOCR run will also download model files into `tmp/paddlex-cache/`.
 

@@ -12,31 +12,60 @@ struct Config {
     let cropLeftRatio: Double
     let cropRightRatio: Double
     let horizontalMarginPx: Int
+    let maxSegmentHeight: Int
+    let oversizedSplitMinGap: Int
+    let tinyFragmentHeight: Int
+    let tinyMergeMaxHeight: Int
+    let recombineShortHeight: Int
+    let disableRecombine: Bool
 }
 
 struct Segment {
     let startY: Int
     let endY: Int
+    let followingGapHeight: Int?
+
+    var height: Int {
+        endY - startY
+    }
+}
+
+struct GapBoundary {
+    let row: Int
+    let gapHeight: Int
 }
 
 func parseArguments() -> Config {
     let args = CommandLine.arguments
 
-    func value(for flag: String) -> String {
+    func requiredValue(for flag: String) -> String {
         guard let index = args.firstIndex(of: flag), index + 1 < args.count else {
             fatalError("Missing value for \(flag)")
         }
         return args[index + 1]
     }
 
+    func optionalValue(for flag: String) -> String? {
+        guard let index = args.firstIndex(of: flag), index + 1 < args.count else {
+            return nil
+        }
+        return args[index + 1]
+    }
+
     return Config(
-        inputDir: URL(fileURLWithPath: value(for: "--input")),
-        outputDir: URL(fileURLWithPath: value(for: "--output")),
-        minGap: Int(value(for: "--min-gap")) ?? 120,
-        whiteThreshold: UInt8(Int(value(for: "--white-threshold")) ?? 245),
-        cropLeftRatio: Double(value(for: "--crop-left-ratio")) ?? 0,
-        cropRightRatio: Double(value(for: "--crop-right-ratio")) ?? 0,
-        horizontalMarginPx: Int(value(for: "--horizontal-margin-px")) ?? 48
+        inputDir: URL(fileURLWithPath: requiredValue(for: "--input")),
+        outputDir: URL(fileURLWithPath: requiredValue(for: "--output")),
+        minGap: Int(optionalValue(for: "--min-gap") ?? "") ?? 120,
+        whiteThreshold: UInt8(Int(optionalValue(for: "--white-threshold") ?? "") ?? 245),
+        cropLeftRatio: Double(optionalValue(for: "--crop-left-ratio") ?? "") ?? 0,
+        cropRightRatio: Double(optionalValue(for: "--crop-right-ratio") ?? "") ?? 0,
+        horizontalMarginPx: Int(optionalValue(for: "--horizontal-margin-px") ?? "") ?? 48,
+        maxSegmentHeight: Int(optionalValue(for: "--max-segment-height") ?? "") ?? 3500,
+        oversizedSplitMinGap: Int(optionalValue(for: "--oversized-split-min-gap") ?? "") ?? 50,
+        tinyFragmentHeight: Int(optionalValue(for: "--tiny-fragment-height") ?? "") ?? 200,
+        tinyMergeMaxHeight: Int(optionalValue(for: "--tiny-merge-max-height") ?? "") ?? 3300,
+        recombineShortHeight: Int(optionalValue(for: "--recombine-short-height") ?? "") ?? 1500,
+        disableRecombine: args.contains("--disable-recombine")
     )
 }
 
@@ -121,42 +150,249 @@ func rowInkFractions(image: CGImage, whiteThreshold: UInt8) -> [Double] {
     return fractions
 }
 
-func detectSegments(rowFractions: [Double], minGap: Int) -> [Segment] {
+func detectBoundaries(
+    rowFractions: [Double],
+    minGap: Int,
+    startY: Int = 0,
+    endY: Int? = nil
+) -> [GapBoundary] {
     let blankThreshold = 0.012
-    let minPageHeight = 700
-    var boundaryRows: [Int] = [0]
+    var boundaries: [GapBoundary] = []
     var gapStart: Int?
+    let upperBound = endY ?? rowFractions.count
 
-    for y in 0..<rowFractions.count {
+    for y in startY..<upperBound {
         if rowFractions[y] < blankThreshold {
             if gapStart == nil {
                 gapStart = y
             }
         } else if let start = gapStart {
-            if y - start >= minGap {
-                boundaryRows.append((start + y) / 2)
+            let gapHeight = y - start
+            if gapHeight >= minGap {
+                boundaries.append(GapBoundary(row: (start + y) / 2, gapHeight: gapHeight))
             }
             gapStart = nil
         }
     }
 
-    if let start = gapStart, rowFractions.count - start >= minGap {
-        boundaryRows.append((start + rowFractions.count) / 2)
-    }
-
-    boundaryRows.append(rowFractions.count)
-    boundaryRows = Array(Set(boundaryRows)).sorted()
-
-    var segments: [Segment] = []
-    for index in 0..<(boundaryRows.count - 1) {
-        let start = boundaryRows[index]
-        let end = boundaryRows[index + 1]
-        if end - start >= minPageHeight {
-            segments.append(Segment(startY: start, endY: end))
+    if let start = gapStart {
+        let gapHeight = upperBound - start
+        if gapHeight >= minGap {
+            boundaries.append(GapBoundary(row: (start + upperBound) / 2, gapHeight: gapHeight))
         }
     }
 
+    return Dictionary(grouping: boundaries, by: \.row)
+        .compactMap { _, group in
+            group.max { lhs, rhs in lhs.gapHeight < rhs.gapHeight }
+        }
+        .sorted { $0.row < $1.row }
+}
+
+func buildSegments(from boundaries: [GapBoundary], totalHeight: Int, startY: Int = 0, endY: Int? = nil) -> [Segment] {
+    let upperBound = endY ?? totalHeight
+    var segments: [Segment] = []
+    var startRow = startY
+    for boundary in boundaries where boundary.row > startY && boundary.row < upperBound {
+        let endRow = boundary.row
+        if endRow > startRow {
+            segments.append(
+                Segment(
+                    startY: startRow,
+                    endY: endRow,
+                    followingGapHeight: boundary.gapHeight
+                )
+            )
+        }
+        startRow = endRow
+    }
+
+    if upperBound > startRow {
+        segments.append(
+            Segment(
+                startY: startRow,
+                endY: upperBound,
+                followingGapHeight: nil
+            )
+        )
+    }
+
     return segments
+}
+
+func splitOversizedSegments(
+    segments: [Segment],
+    rowFractions: [Double],
+    minGap: Int,
+    maxSegmentHeight: Int
+) -> [Segment] {
+    guard minGap > 0 else {
+        return segments
+    }
+
+    var pending = segments
+    var changed = true
+
+    while changed {
+        changed = false
+        var nextSegments: [Segment] = []
+
+        for segment in pending {
+            guard segment.height > maxSegmentHeight else {
+                nextSegments.append(segment)
+                continue
+            }
+
+            let boundaries = detectBoundaries(
+                rowFractions: rowFractions,
+                minGap: minGap,
+                startY: segment.startY,
+                endY: segment.endY
+            )
+            let splitSegments = buildSegments(
+                from: boundaries,
+                totalHeight: rowFractions.count,
+                startY: segment.startY,
+                endY: segment.endY
+            )
+
+            if splitSegments.count > 1 {
+                var adjustedSegments = splitSegments
+                let last = adjustedSegments.removeLast()
+                adjustedSegments.append(
+                    Segment(
+                        startY: last.startY,
+                        endY: last.endY,
+                        followingGapHeight: segment.followingGapHeight
+                    )
+                )
+                nextSegments.append(contentsOf: adjustedSegments)
+                changed = true
+            } else {
+                nextSegments.append(segment)
+            }
+        }
+
+        pending = nextSegments
+    }
+
+    return pending
+}
+
+func detectSegments(
+    rowFractions: [Double],
+    minGap: Int,
+    maxSegmentHeight: Int,
+    oversizedSplitMinGap: Int,
+    tinyFragmentHeight: Int,
+    tinyMergeMaxHeight: Int,
+    recombineShortHeight: Int,
+    disableRecombine: Bool
+) -> [Segment] {
+    let primaryBoundaries = detectBoundaries(rowFractions: rowFractions, minGap: minGap)
+    var segments = buildSegments(from: primaryBoundaries, totalHeight: rowFractions.count)
+    if oversizedSplitMinGap < minGap {
+        segments = splitOversizedSegments(
+            segments: segments,
+            rowFractions: rowFractions,
+            minGap: oversizedSplitMinGap,
+            maxSegmentHeight: maxSegmentHeight
+        )
+    }
+
+    guard !disableRecombine, segments.count > 1 else {
+        return segments
+    }
+
+    func mergeSegments(_ left: Segment, _ right: Segment) -> Segment {
+        Segment(
+            startY: left.startY,
+            endY: right.endY,
+            followingGapHeight: right.followingGapHeight
+        )
+    }
+
+    var rescued = segments
+    while true {
+        var mergedAny = false
+
+        for index in 0..<rescued.count {
+            let current = rescued[index]
+            if current.height >= tinyFragmentHeight {
+                continue
+            }
+
+            var candidates: [(score: Int, mergeLeft: Bool)] = []
+
+            if index > 0 {
+                let left = rescued[index - 1]
+                let leftGap = left.followingGapHeight ?? Int.max
+                let combinedHeight = left.height + leftGap + current.height
+                if combinedHeight <= tinyMergeMaxHeight {
+                    candidates.append((score: combinedHeight, mergeLeft: true))
+                }
+            }
+
+            if index + 1 < rescued.count {
+                let right = rescued[index + 1]
+                let rightGap = current.followingGapHeight ?? Int.max
+                let combinedHeight = current.height + rightGap + right.height
+                if combinedHeight <= tinyMergeMaxHeight {
+                    candidates.append((score: combinedHeight, mergeLeft: false))
+                }
+            }
+
+            guard let chosen = candidates.min(by: { lhs, rhs in
+                if lhs.score == rhs.score {
+                    return lhs.mergeLeft && !rhs.mergeLeft
+                }
+                return lhs.score < rhs.score
+            }) else {
+                continue
+            }
+
+            if chosen.mergeLeft {
+                rescued[index - 1] = mergeSegments(rescued[index - 1], current)
+                rescued.remove(at: index)
+            } else {
+                rescued[index] = mergeSegments(current, rescued[index + 1])
+                rescued.remove(at: index + 1)
+            }
+
+            mergedAny = true
+            break
+        }
+
+        if !mergedAny {
+            break
+        }
+    }
+
+    var recombined: [Segment] = []
+    var current = rescued[0]
+
+    for next in rescued.dropFirst() {
+        let gapHeight = current.followingGapHeight ?? Int.max
+        let combinedHeight = current.height + gapHeight + next.height
+        let shouldMerge =
+            combinedHeight <= maxSegmentHeight &&
+            (current.height < recombineShortHeight || next.height < recombineShortHeight)
+
+        if shouldMerge {
+            current = Segment(
+                startY: current.startY,
+                endY: next.endY,
+                followingGapHeight: next.followingGapHeight
+            )
+            continue
+        }
+
+        recombined.append(current)
+        current = next
+    }
+
+    recombined.append(current)
+    return recombined
 }
 
 func writePNG(image: CGImage, to url: URL) throws {
@@ -196,6 +432,45 @@ func cropHorizontally(_ image: CGImage, leftRatio: Double, rightRatio: Double, m
     return image.cropping(to: cropRect)
 }
 
+func stitchImages(_ images: [CGImage]) -> CGImage? {
+    guard !images.isEmpty else {
+        return nil
+    }
+
+    let width = images.map(\.width).max() ?? 0
+    let height = images.reduce(0) { $0 + $1.height }
+    guard width > 0, height > 0 else {
+        return nil
+    }
+
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let alphaInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+    guard let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: 0,
+        space: colorSpace,
+        bitmapInfo: alphaInfo
+    ) else {
+        return nil
+    }
+
+    context.setFillColor(NSColor.white.cgColor)
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+    var yOffset = height
+    for image in images {
+        // Left-align cropped parts to preserve each part's local x-geometry.
+        yOffset -= image.height
+        let rect = CGRect(x: 0, y: yOffset, width: image.width, height: image.height)
+        context.draw(image, in: rect)
+    }
+
+    return context.makeImage()
+}
+
 func imageFiles(in directory: URL) -> [URL] {
     let fileManager = FileManager.default
     guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil) else {
@@ -215,33 +490,45 @@ let config = parseArguments()
 let fileManager = FileManager.default
 try fileManager.createDirectory(at: config.outputDir, withIntermediateDirectories: true)
 
-var pageIndex = 1
-for imageURL in imageFiles(in: config.inputDir) {
+let croppedImages = imageFiles(in: config.inputDir).compactMap { imageURL -> CGImage? in
     guard let rawImage = loadCGImage(imageURL) else {
         fputs("Failed to load \(imageURL.path)\n", stderr)
-        continue
+        return nil
     }
 
-    let image = cropHorizontally(
+    return cropHorizontally(
         rawImage,
         leftRatio: config.cropLeftRatio,
         rightRatio: config.cropRightRatio,
         marginPx: config.horizontalMarginPx
     ) ?? rawImage
+}
 
-    let segments = detectSegments(
-        rowFractions: rowInkFractions(image: image, whiteThreshold: config.whiteThreshold),
-        minGap: config.minGap
+guard let stitchedImage = stitchImages(croppedImages) else {
+    throw NSError(
+        domain: "SplitChapter",
+        code: 3,
+        userInfo: [NSLocalizedDescriptionKey: "Unable to build stitched chapter image"]
     )
+}
 
-    for segment in segments {
-        guard let cropped = crop(image, segment: segment) else {
-            continue
-        }
+let segments = detectSegments(
+    rowFractions: rowInkFractions(image: stitchedImage, whiteThreshold: config.whiteThreshold),
+    minGap: config.minGap,
+    maxSegmentHeight: config.maxSegmentHeight,
+    oversizedSplitMinGap: config.oversizedSplitMinGap,
+    tinyFragmentHeight: config.tinyFragmentHeight,
+    tinyMergeMaxHeight: config.tinyMergeMaxHeight,
+    recombineShortHeight: config.recombineShortHeight,
+    disableRecombine: config.disableRecombine
+)
 
-        let filename = String(format: "page-%03d.png", pageIndex)
-        let outputURL = config.outputDir.appendingPathComponent(filename)
-        try writePNG(image: cropped, to: outputURL)
-        pageIndex += 1
+for (index, segment) in segments.enumerated() {
+    guard let cropped = crop(stitchedImage, segment: segment) else {
+        continue
     }
+
+    let filename = String(format: "page-%03d.png", index + 1)
+    let outputURL = config.outputDir.appendingPathComponent(filename)
+    try writePNG(image: cropped, to: outputURL)
 }
