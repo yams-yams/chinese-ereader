@@ -111,7 +111,7 @@ The sweep writes page images for each candidate under `tmp/split-gap-eval/` and 
 
 The first PaddleOCR run will also download model files into `tmp/paddlex-cache/`.
 
-Build a prompt bundle for a local Codex run, including the expected output schema:
+Build a prompt bundle for inspection/debugging, including the expected output schema:
 
 ```bash
 .venv/bin/python scripts/build_codex_full_chapter_prompt.py --series renjian-bailijin --chapter chapter-001 > tmp/codex-full-chapter-prompt.json
@@ -120,10 +120,23 @@ Build a prompt bundle for a local Codex run, including the expected output schem
 Run local Codex with the saved command wrapper:
 
 ```bash
-./codex-full-chapter-command.sh
+.venv/bin/python scripts/run_full_chapter_enrichment.py --series renjian-bailijin --chapter chapter-001
 ```
 
-Validate a local Codex JSON response against the chapter schema:
+The runner writes the deterministic chapter output to:
+
+- `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
+
+And appends structured run logs to:
+
+- `data/translated/logs/full-chapter-enrichment-runs.jsonl`
+
+During long runs, the runner also streams and persists live Codex event JSONL plus stderr logs under:
+
+- `tmp/<series>/<chapter>/<timestamp>-codex-events.jsonl`
+- `tmp/<series>/<chapter>/<timestamp>-codex-stderr.log`
+
+Validate a saved local Codex JSON response against the chapter schema:
 
 ```bash
 .venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/chapter1.json
@@ -147,7 +160,7 @@ Merge accepted patch enrichments into the page annotations:
 .venv/bin/python scripts/apply_annotation_patches.py --series renjian-bailijin --chapter chapter-001 --patches data/review/renjian-bailijin/chapter-001/patches.json --enrichment tmp/codex-ocr-patches-output.json
 ```
 
-The archived OpenAI probe scripts are kept locally under `scripts/archive/` for reference, but the active workflow now goes through the Codex prompt builder and local `codex exec`.
+The archived OpenAI probe scripts are kept locally under `scripts/archive/` for reference, but the active workflow now goes through the logged full-chapter runner and local `codex exec`.
 
 Print the expected JSON schema by itself:
 

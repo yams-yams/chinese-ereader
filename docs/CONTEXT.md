@@ -71,6 +71,9 @@ What is not complete yet:
 - `scripts/build_codex_full_chapter_prompt.py`
   - Builds prompt payloads for local `codex exec`
 
+- `scripts/run_full_chapter_enrichment.py`
+  - Reusable logged runner for local full-chapter `codex exec`
+
 - `scripts/validate_full_chapter_output.py`
   - Validates structured chapter output and can print the JSON schema
 
@@ -228,8 +231,21 @@ Build the local Codex prompt bundle:
 Run the saved local Codex command:
 
 ```bash
-./codex-full-chapter-command.sh
+.venv/bin/python scripts/run_full_chapter_enrichment.py --series renjian-bailijin --chapter chapter-001
 ```
+
+The runner writes the raw model output to:
+
+- `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
+
+And appends a structured JSONL log here:
+
+- `data/translated/logs/full-chapter-enrichment-runs.jsonl`
+
+For observability during long runs, the runner also persists live Codex event JSONL and stderr logs here:
+
+- `tmp/<series>/<chapter>/<timestamp>-codex-events.jsonl`
+- `tmp/<series>/<chapter>/<timestamp>-codex-stderr.log`
 
 Validate the saved JSON output:
 

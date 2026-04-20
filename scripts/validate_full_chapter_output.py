@@ -7,6 +7,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -29,7 +30,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_text(input_path: str | None) -> str:
     if input_path:
-        return Path(input_path).read_text()
+        return Path(input_path).read_text(encoding="utf-8")
     return sys.stdin.read()
 
 
@@ -46,6 +47,25 @@ def extract_json_blob(text: str) -> str:
     return stripped[start:]
 
 
+def parse_json_text(text: str) -> Any:
+    json_blob = extract_json_blob(text)
+    try:
+        return json.loads(json_blob)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"Invalid JSON: {error}") from error
+
+
+def validate_payload(payload: Any) -> ChapterEnrichment:
+    try:
+        return ChapterEnrichment.model_validate(payload)
+    except ValidationError as error:
+        raise ValueError(str(error)) from error
+
+
+def validate_text(text: str) -> ChapterEnrichment:
+    return validate_payload(parse_json_text(text))
+
+
 def main() -> None:
     args = parse_args()
 
@@ -54,16 +74,9 @@ def main() -> None:
         return
 
     raw_text = load_text(args.input)
-    json_blob = extract_json_blob(raw_text)
-
     try:
-        payload = json.loads(json_blob)
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"Invalid JSON: {error}")
-
-    try:
-        validated = ChapterEnrichment.model_validate(payload)
-    except ValidationError as error:
+        validated = validate_text(raw_text)
+    except ValueError as error:
         print(error, file=sys.stderr)
         raise SystemExit(1)
 
