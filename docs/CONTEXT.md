@@ -91,6 +91,9 @@ What is not complete yet:
 - Existing translated/output experiments:
   - `data/translated/`
   - `tmp/`
+- Derived app-facing chapter models:
+  - `data/processed/annotations/<series>/<chapter>/read-model.json`
+  - `data/processed/annotations/<series>/<chapter>/refine-model.json`
 
 Treat `data/raw/` as source-of-truth input and do not overwrite it.
 
@@ -237,6 +240,12 @@ Run the saved local Codex command:
 The runner writes the raw model output to:
 
 - `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
+
+Build the migration-safe chapter artifacts:
+
+```bash
+.venv/bin/python scripts/build_chapter_artifacts.py --series renjian-bailijin --chapter chapter-001
+```
 
 And appends a structured JSONL log here:
 

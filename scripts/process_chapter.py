@@ -34,24 +34,38 @@ def build_manifest(series_slug: str, chapter_slug: str) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     page_entries = []
+    segment_entries = []
     for page_path in sorted(pages_dir.glob("page-*.png")):
         annotation_path = annotations_dir / f"{page_path.stem}.json"
+        page_id = page_path.stem
+        segment_id = page_id.replace("page-", "segment-", 1)
         page_entries.append(
             {
-                "id": page_path.stem,
+                "id": page_id,
                 "image": str(page_path.relative_to(ROOT)),
                 "annotation": str(annotation_path.relative_to(ROOT)),
+            }
+        )
+        segment_entries.append(
+            {
+                "id": segment_id,
+                "image": str(page_path.relative_to(ROOT)),
+                "annotation": str(annotation_path.relative_to(ROOT)),
+                "sourcePageId": page_id,
             }
         )
 
     manifest = {
         "series": series_slug,
         "chapter": chapter_slug,
+        "title": f"{series_slug} / {chapter_slug}",
+        "segmentCount": len(segment_entries),
+        "segments": segment_entries,
         "pageCount": len(page_entries),
         "pages": page_entries,
     }
 
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
 
 
 def main() -> None:

@@ -65,6 +65,39 @@ Suggested slug for this title:
 
 - `renjian-bailijin`
 
+## Data durability
+
+Not all data in this repo has the same importance.
+
+Source-of-truth inputs that should be backed up:
+
+- `data/raw/`
+  - Manual source captures from Bilibili Manga.
+  - If these are lost, the chapter has to be re-captured.
+
+Meaningful intermediate work that should usually be preserved:
+
+- `data/processed/annotations/<series>/<chapter>/page-*.json`
+  - OCR output plus accepted patch-applied annotation state.
+- `data/review/<series>/<chapter>/patches.json`
+  - Saved OCR review/patch drafting data.
+- `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
+  - Full-chapter Codex enrichment output.
+- `data/translated/chapter1.json`
+  - Legacy enrichment output still used by some migration steps.
+
+Rebuildable derived artifacts that are safe not to commit:
+
+- `data/processed/chapters/<series>/<chapter>.json`
+- `data/processed/annotations/<series>/<chapter>/read-model.json`
+- `data/processed/annotations/<series>/<chapter>/refine-model.json`
+
+If the derived artifacts are lost but the annotation, review, and enrichment inputs still exist, rebuild them with:
+
+```bash
+.venv/bin/python scripts/build_chapter_artifacts.py --series renjian-bailijin --chapter chapter-001
+```
+
 ## What to do next
 
 Put the four chapter 1 images here:
