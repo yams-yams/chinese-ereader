@@ -49,6 +49,19 @@ def resolve_annotation_path(relative_path: str) -> Optional[Path]:
     return candidate
 
 
+def annotation_location(annotation_path: Path) -> tuple[str, str, str] | None:
+    try:
+        relative = annotation_path.resolve().relative_to(ANNOTATIONS_ROOT.resolve())
+    except ValueError:
+        return None
+
+    if len(relative.parts) != 3:
+        return None
+
+    series, chapter, filename = relative.parts
+    return series, chapter, Path(filename).stem
+
+
 def resolve_page_image_path(relative_path: str) -> Optional[Path]:
     candidate = (ROOT / relative_path).resolve()
     if not candidate.is_file():
@@ -69,30 +82,21 @@ def json_response(handler: SimpleHTTPRequestHandler, status: HTTPStatus, payload
     handler.wfile.write(response)
 
 
-def delete_sentence(annotation: dict, sentence_id: str) -> dict:
-    kept_sentences = [
-        sentence for sentence in annotation.get("sentences", []) if sentence.get("id") != sentence_id
-    ]
-    kept_sentence_ids = {sentence.get("id") for sentence in kept_sentences}
-
-    kept_characters = [
-        character
-        for character in annotation.get("characters", [])
-        if character.get("sentenceId") in kept_sentence_ids
-    ]
-    kept_character_ids = {character.get("id") for character in kept_characters}
-
-    kept_words = []
-    for word in annotation.get("words", []):
-        character_ids = word.get("characterIds") or []
-        if any(character_id in kept_character_ids for character_id in character_ids):
-            kept_words.append(word)
+def set_sentence_status(annotation: dict, sentence_id: str, status: str) -> tuple[dict, bool]:
+    updated_sentences = []
+    found = False
+    for sentence in annotation.get("sentences", []):
+        next_sentence = dict(sentence)
+        if next_sentence.get("id") == sentence_id:
+            next_sentence["status"] = status
+            found = True
+        elif not next_sentence.get("status"):
+            next_sentence["status"] = "active"
+        updated_sentences.append(next_sentence)
 
     updated_annotation = dict(annotation)
-    updated_annotation["sentences"] = kept_sentences
-    updated_annotation["characters"] = kept_characters
-    updated_annotation["words"] = kept_words
-    return updated_annotation
+    updated_annotation["sentences"] = updated_sentences
+    return updated_annotation, found
 
 
 def compact_text(text: str) -> str:
@@ -261,6 +265,20 @@ def ensure_success(result: subprocess.CompletedProcess, step_name: str) -> None:
     raise RuntimeError(f"{step_name} failed.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
 
 
+def rebuild_chapter_artifacts(series: str, chapter: str) -> None:
+    build_result = run_command(
+        [
+            str(PYTHON_BIN),
+            "scripts/build_chapter_artifacts.py",
+            "--series",
+            series,
+            "--chapter",
+            chapter,
+        ]
+    )
+    ensure_success(build_result, "Rebuild chapter artifacts")
+
+
 def process_patch_pipeline(payload: dict) -> dict:
     series = str(payload.get("series", "")).strip()
     chapter = str(payload.get("chapter", "")).strip()
@@ -361,6 +379,7 @@ def process_patch_pipeline(payload: dict) -> dict:
         ]
     )
     ensure_success(apply_result, "Apply patch output")
+    rebuild_chapter_artifacts(series, chapter)
 
     patch_output = json.loads(output_path.read_text(encoding="utf-8"))
     patch_analysis = patch_output.get("patch_analyses", [{}])[0]
@@ -391,7 +410,10 @@ class ReaderHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/delete-sentence":
-            self.handle_delete_sentence(payload)
+            self.handle_set_sentence_status(payload, "deleted")
+            return
+        if parsed.path == "/api/restore-sentence":
+            self.handle_set_sentence_status(payload, "active")
             return
         if parsed.path == "/api/process-patch":
             self.handle_process_patch(payload)
@@ -399,20 +421,39 @@ class ReaderHandler(SimpleHTTPRequestHandler):
 
         self.send_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
 
-    def handle_delete_sentence(self, payload: dict) -> None:
+    def handle_set_sentence_status(self, payload: dict, status: str) -> None:
         annotation_path = resolve_annotation_path(str(payload.get("annotationPath", "")))
         sentence_id = str(payload.get("sentenceId", "")).strip()
         if annotation_path is None or not sentence_id:
             self.send_error(HTTPStatus.BAD_REQUEST, "annotationPath and sentenceId are required")
             return
 
+        location = annotation_location(annotation_path)
+        if location is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "annotationPath must resolve under processed annotations")
+            return
+        series, chapter, _page_id = location
+
         annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
-        updated_annotation = delete_sentence(annotation, sentence_id)
+        updated_annotation, found = set_sentence_status(annotation, sentence_id, status)
+        if not found:
+            self.send_error(HTTPStatus.NOT_FOUND, f"Unknown sentenceId: {sentence_id}")
+            return
         annotation_path.write_text(
             json.dumps(updated_annotation, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        json_response(self, HTTPStatus.OK, updated_annotation)
+        rebuild_chapter_artifacts(series, chapter)
+        json_response(
+            self,
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "sentenceId": sentence_id,
+                "status": status,
+                "annotation": updated_annotation,
+            },
+        )
 
     def handle_process_patch(self, payload: dict) -> None:
         try:

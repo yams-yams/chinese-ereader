@@ -7,7 +7,6 @@ const state = {
   manifest: null,
   annotations: new Map(),
   rawAnnotations: new Map(),
-  deletedSentenceIdsByPage: new Map(),
   enrichment: null,
   hoveredWordKey: null,
   activeSentenceKey: null,
@@ -262,24 +261,18 @@ function enrichAnnotation(pageId, annotation) {
   };
 }
 
+function isDeletedSentence(sentence) {
+  return (sentence?.status ?? "active") === "deleted";
+}
+
 function filteredAnnotationForPage(pageId) {
   const rawAnnotation = state.rawAnnotations.get(pageId);
   if (!rawAnnotation) {
     return null;
   }
 
-  const deletedSentenceIds = state.deletedSentenceIdsByPage.get(pageId) ?? new Set();
-  if (deletedSentenceIds.size === 0) {
-    return {
-      ...rawAnnotation,
-      characters: rawAnnotation.characters.map((character) => ({ ...character })),
-      words: rawAnnotation.words.map((word) => ({ ...word })),
-      sentences: rawAnnotation.sentences.map((sentence) => ({ ...sentence })),
-    };
-  }
-
   const keptSentences = rawAnnotation.sentences
-    .filter((sentence) => !deletedSentenceIds.has(sentence.id))
+    .filter((sentence) => !isDeletedSentence(sentence))
     .map((sentence) => ({ ...sentence }));
   const keptSentenceIds = new Set(keptSentences.map((sentence) => sentence.id));
   const keptCharacters = rawAnnotation.characters
@@ -332,7 +325,7 @@ function renderPageReviewPanel() {
     return;
   }
 
-  const annotation = state.annotations.get(state.selectedDebugPageId);
+  const annotation = state.rawAnnotations.get(state.selectedDebugPageId);
   if (!annotation) {
     renderEmptyPageReviewPanel("No OCR annotations are loaded for this page.");
     return;
@@ -344,21 +337,21 @@ function renderPageReviewPanel() {
         ${annotation.sentences
           .map((sentence, index) => {
             const isActive = sentenceKey(state.selectedDebugPageId, sentence.id) === state.activeSentenceKey;
+            const isDeleted = isDeletedSentence(sentence);
             return `
-              <div class="page-review-item ${isActive ? "active" : ""}" data-sentence-id="${sentence.id}">
+              <div class="page-review-item ${isActive ? "active" : ""} ${isDeleted ? "deleted" : ""}" data-sentence-id="${sentence.id}">
                 <button
-                  class="page-review-delete"
+                  class="page-review-delete ${isDeleted ? "page-review-restore" : ""}"
                   type="button"
-                  data-delete-sentence-id="${sentence.id}"
-                  aria-label="Delete sentence ${index + 1}"
-                  title="Delete sentence"
-                >🗑</button>
+                  ${isDeleted ? `data-restore-sentence-id="${sentence.id}" aria-label="Restore sentence ${index + 1}" title="Restore sentence">↺` : `data-delete-sentence-id="${sentence.id}" aria-label="Delete sentence ${index + 1}" title="Delete sentence">🗑`}
+                </button>
                 <button
                   class="page-review-body"
                   type="button"
                   data-select-sentence-id="${sentence.id}"
                 >
                   <p class="page-review-index">Sentence ${index + 1}</p>
+                  <p class="page-review-status">${isDeleted ? "Deleted" : "Active"}</p>
                   <p class="page-review-text">${sentenceDisplayText(sentence, index)}</p>
                 </button>
               </div>
@@ -367,7 +360,7 @@ function renderPageReviewPanel() {
           .join("")}
       </div>
     `
-    : `<p class="empty">No OCR sentences remain on this page.</p>`;
+    : `<p class="empty">No OCR sentences are available on this page.</p>`;
 
   elements.pageReviewPanel.innerHTML = `
     <h2>Page Sentences</h2>
@@ -386,6 +379,17 @@ function renderPageReviewPanel() {
         return;
       }
       deleteSentenceFromPage(state.selectedDebugPageId, sentenceId);
+    });
+  }
+
+  for (const restoreButton of elements.pageReviewPanel.querySelectorAll("[data-restore-sentence-id]")) {
+    restoreButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const sentenceId = event.currentTarget.dataset.restoreSentenceId;
+      if (!sentenceId) {
+        return;
+      }
+      restoreSentenceFromPage(state.selectedDebugPageId, sentenceId);
     });
   }
 
@@ -438,7 +442,6 @@ async function reloadPageById(pageId) {
       };
     state.rawAnnotations.set(page.id, rawAnnotation);
   }
-  state.deletedSentenceIdsByPage.delete(pageId);
   rebuildAnnotation(pageId);
   rerenderChapterPreservingScroll();
   refreshPanelsFromSelection();
@@ -447,7 +450,7 @@ async function reloadPageById(pageId) {
 }
 
 function selectSentenceFromReviewPanel(pageId, sentenceId) {
-  const annotation = state.annotations.get(pageId);
+  const annotation = state.rawAnnotations.get(pageId) ?? state.annotations.get(pageId);
   const sentence = annotation?.sentences.find((candidate) => candidate.id === sentenceId);
   if (!sentence) {
     return;
@@ -462,9 +465,7 @@ function selectSentenceFromReviewPanel(pageId, sentenceId) {
     hoverIntentTimer = null;
   }
 
-  const charactersById = new Map(
-    annotation.characters.map((character) => [character.id, character]),
-  );
+  const charactersById = new Map(annotation.characters.map((character) => [character.id, character]));
   elements.wordPanel.innerHTML = `<h2>Word</h2><p class="empty">Hover a character hotspot.</p>`;
   updateSentencePanel(
     sentence,
@@ -476,14 +477,18 @@ function selectSentenceFromReviewPanel(pageId, sentenceId) {
   renderInteractionState();
 }
 
-async function deleteSentenceFromPage(pageId, sentenceId) {
-  const annotation = state.annotations.get(pageId);
+async function setSentenceStatusFromPage(pageId, sentenceId, nextStatus) {
+  const annotation = state.rawAnnotations.get(pageId) ?? state.annotations.get(pageId);
   const sentence = annotation?.sentences.find((candidate) => candidate.id === sentenceId);
   if (!sentence) {
     return;
   }
 
-  const confirmed = window.confirm(`Delete "${sentenceDisplayText(sentence, 0)}" from ${pageId}?`);
+  const actionLabel = nextStatus === "deleted" ? "Delete" : "Restore";
+  const endpoint = nextStatus === "deleted" ? "/api/delete-sentence" : "/api/restore-sentence";
+  const confirmed = window.confirm(
+    `${actionLabel} "${sentenceDisplayText(sentence, 0)}" ${nextStatus === "deleted" ? "from" : "on"} ${pageId}?`,
+  );
   if (!confirmed) {
     return;
   }
@@ -493,7 +498,7 @@ async function deleteSentenceFromPage(pageId, sentenceId) {
     return;
   }
 
-  const response = await fetch("/api/delete-sentence", {
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -507,18 +512,17 @@ async function deleteSentenceFromPage(pageId, sentenceId) {
   if (!response.ok) {
     const responseText = await response.text();
     if (response.status === 404 || response.status === 501) {
-      window.alert("Delete API is unavailable. Restart the reader with `python3 scripts/serve_reader.py`.");
+      window.alert(`${actionLabel} API is unavailable. Restart the reader with \`python3 scripts/serve_reader.py\`.`);
     } else {
-      window.alert(`Failed to delete the sentence from disk (${response.status}). ${responseText}`);
+      window.alert(`Failed to ${nextStatus === "deleted" ? "delete" : "restore"} the sentence on disk (${response.status}). ${responseText}`);
     }
     return;
   }
 
-  const updatedAnnotation = await response.json();
-  state.rawAnnotations.set(pageId, updatedAnnotation);
-  state.deletedSentenceIdsByPage.delete(pageId);
+  const body = await response.json();
+  state.rawAnnotations.set(pageId, body.annotation);
 
-  if (sentenceKey(pageId, sentenceId) === state.activeSentenceKey) {
+  if (nextStatus === "deleted" && sentenceKey(pageId, sentenceId) === state.activeSentenceKey) {
     state.activeSentenceKey = null;
   }
 
@@ -527,6 +531,14 @@ async function deleteSentenceFromPage(pageId, sentenceId) {
   refreshPanelsFromSelection();
   renderPageReviewPanel();
   renderInteractionState();
+}
+
+async function deleteSentenceFromPage(pageId, sentenceId) {
+  await setSentenceStatusFromPage(pageId, sentenceId, "deleted");
+}
+
+async function restoreSentenceFromPage(pageId, sentenceId) {
+  await setSentenceStatusFromPage(pageId, sentenceId, "active");
 }
 
 async function loadEnrichment() {
@@ -808,6 +820,7 @@ function updateSentencePanel(sentence, options = {}) {
   }
 
   elements.sentencePanel.innerHTML = panelMarkup("Sentence", [
+    { label: "Status", value: sentence.status ?? "active" },
     { label: "Chinese", value: sentence.text },
     { label: "Pinyin", value: sentence.pinyin ?? "Pending" },
     { label: "Meaning", value: sentence.translation ?? "Pending" },
@@ -830,23 +843,29 @@ function refreshPanelsFromSelection() {
   }
 
   if (state.activeSentenceKey) {
-    for (const [pageId, annotation] of state.annotations.entries()) {
-      const sentenceId = keyId(state.activeSentenceKey);
-      const sentence = annotation.sentences.find((candidate) => candidate.id === sentenceId);
-      if (!sentence || sentenceKey(pageId, sentence.id) !== state.activeSentenceKey) {
-        continue;
+    const separatorIndex = state.activeSentenceKey.indexOf(":");
+    if (separatorIndex !== -1) {
+      const pageId = state.activeSentenceKey.slice(0, separatorIndex);
+      const sentenceId = state.activeSentenceKey.slice(separatorIndex + 1);
+      const annotation = state.annotations.get(pageId);
+      const fallbackAnnotation = state.rawAnnotations.get(pageId);
+      const sentence = annotation?.sentences.find((candidate) => candidate.id === sentenceId)
+        ?? fallbackAnnotation?.sentences.find((candidate) => candidate.id === sentenceId);
+      const geometryAnnotation = annotation?.sentences.some((candidate) => candidate.id === sentenceId)
+        ? annotation
+        : fallbackAnnotation;
+      if (sentence && geometryAnnotation) {
+        const charactersById = new Map(
+          geometryAnnotation.characters.map((character) => [character.id, character]),
+        );
+        updateSentencePanel(
+          sentence,
+          state.showDebugPolygons
+            ? { polygon: sentencePolygon(sentence, charactersById) }
+            : {},
+        );
+        return;
       }
-
-      const charactersById = new Map(
-        annotation.characters.map((character) => [character.id, character]),
-      );
-      updateSentencePanel(
-        sentence,
-        state.showDebugPolygons
-          ? { polygon: sentencePolygon(sentence, charactersById) }
-          : {},
-      );
-      return;
     }
   }
 

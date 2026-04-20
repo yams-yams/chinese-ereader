@@ -181,6 +181,15 @@ button.active {
   background: rgba(255, 245, 236, 0.95);
 }
 
+.page-review-item.deleted {
+  background: rgba(31, 27, 24, 0.04);
+}
+
+.page-review-item.deleted .page-review-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
 .page-review-delete {
   display: inline-flex;
   align-items: center;
@@ -198,6 +207,16 @@ button.active {
 .page-review-delete:hover,
 .page-review-delete:focus-visible {
   background: rgba(184, 67, 47, 0.2);
+}
+
+.page-review-restore {
+  background: rgba(35, 132, 67, 0.12);
+  color: rgb(35, 96, 53);
+}
+
+.page-review-restore:hover,
+.page-review-restore:focus-visible {
+  background: rgba(35, 132, 67, 0.2);
 }
 
 .page-review-body {
@@ -221,6 +240,19 @@ button.active {
   font-size: 0.78rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.page-review-status {
+  margin-bottom: 4px;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.page-review-item.deleted .page-review-status {
+  color: var(--muted);
 }
 
 .page-review-text {
