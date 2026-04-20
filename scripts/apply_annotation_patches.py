@@ -300,6 +300,7 @@ def main() -> None:
 
             sentence = {
                 "id": sentence_id,
+                "status": "active",
                 "text": analysis.normalized_text or analysis.original_text,
                 "pinyin": analysis.sentence_pinyin,
                 "translation": analysis.sentence_translation,

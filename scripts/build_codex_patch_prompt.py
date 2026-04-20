@@ -103,6 +103,7 @@ def build_neighbor_sentences(
         sentence
         for sentence in annotation.get("sentences", [])
         if sentence.get("source", {}).get("type") != "patch"
+        and (sentence.get("status") or "active") != "deleted"
     ]
     if not sentences:
         return []

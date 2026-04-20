@@ -168,6 +168,10 @@ def build_segments(manifest: ChapterManifest, annotations: dict[str, dict[str, A
     return built_segments
 
 
+def is_active_sentence(sentence: dict[str, Any]) -> bool:
+    return (sentence.get("status") or "active") != "deleted"
+
+
 def collect_read_entities(
     manifest: ChapterManifest,
     annotations: dict[str, dict[str, Any]],
@@ -182,8 +186,18 @@ def collect_read_entities(
     for segment in manifest.segments:
         annotation = annotations[segment.id]
         source_page_id = segment.sourcePageId
+        active_sentences = [
+            sentence for sentence in annotation.get("sentences", []) if is_active_sentence(sentence)
+        ]
+        active_sentence_ids = {sentence["id"] for sentence in active_sentences}
+        active_characters = [
+            character
+            for character in annotation.get("characters", [])
+            if character.get("sentenceId") in active_sentence_ids
+        ]
+        active_character_ids = {character["id"] for character in active_characters}
 
-        for character in annotation.get("characters", []):
+        for character in active_characters:
             read_characters.append(
                 ReadCharacter(
                     id=character["id"],
@@ -195,13 +209,13 @@ def collect_read_entities(
                 )
             )
 
-        for sentence in annotation.get("sentences", []):
+        for sentence in active_sentences:
             analysis = analyses.get((source_page_id, sentence["id"]))
             read_sentences.append(
                 ReadSentence(
                     id=sentence["id"],
                     segmentId=segment.id,
-                    status="active",
+                    status=sentence.get("status") or "active",
                     text=(analysis.normalized_text if analysis else sentence.get("text")) or "",
                     pinyin=(analysis.sentence_pinyin if analysis else sentence.get("pinyin")) or "",
                     translation=(analysis.sentence_translation if analysis else sentence.get("translation")),
@@ -224,6 +238,13 @@ def collect_read_entities(
 
         if enrichment is None:
             for word in annotation.get("words", []):
+                character_ids = [
+                    character_id
+                    for character_id in list(word.get("characterIds") or [])
+                    if character_id in active_character_ids
+                ]
+                if not character_ids:
+                    continue
                 read_words.append(
                     ReadWord(
                         id=word["id"],
@@ -231,7 +252,7 @@ def collect_read_entities(
                         text=word.get("text", ""),
                         pinyin=word.get("pinyin") or "",
                         translation=word.get("translation"),
-                        characterIds=list(word.get("characterIds") or []),
+                        characterIds=character_ids,
                         polygon=word.get("polygon", []),
                     )
                 )
@@ -239,14 +260,21 @@ def collect_read_entities(
 
         enriched_word_ids: set[str] = set()
         word_counter = 1
-        for sentence in annotation.get("sentences", []):
+        for sentence in active_sentences:
             analysis = analyses.get((source_page_id, sentence["id"]))
             if analysis is None:
                 continue
             for word in analysis.words:
+                character_ids = [
+                    character_id
+                    for character_id in list(word.ocr_token_ids)
+                    if character_id in active_character_ids
+                ]
+                if not character_ids:
+                    continue
                 word_id = f"{segment.id}-word-{word_counter:04d}"
                 word_counter += 1
-                enriched_word_ids.update(word.ocr_token_ids)
+                enriched_word_ids.update(character_ids)
                 read_words.append(
                     ReadWord(
                         id=word_id,
@@ -254,17 +282,24 @@ def collect_read_entities(
                         text=word.surface_text,
                         pinyin=word.pinyin,
                         translation=word.translation,
-                        characterIds=list(word.ocr_token_ids),
+                        characterIds=character_ids,
                         normalizedText=word.normalized_text,
                         confidence=word.confidence,
                     )
                 )
                 for character in read_characters:
-                    if character.segmentId == segment.id and character.id in word.ocr_token_ids:
+                    if character.segmentId == segment.id and character.id in character_ids:
                         character.wordId = word_id
 
         for word in annotation.get("words", []):
-            if any(character_id in enriched_word_ids for character_id in word.get("characterIds") or []):
+            character_ids = [
+                character_id
+                for character_id in list(word.get("characterIds") or [])
+                if character_id in active_character_ids
+            ]
+            if not character_ids:
+                continue
+            if any(character_id in enriched_word_ids for character_id in character_ids):
                 continue
             read_words.append(
                 ReadWord(
@@ -273,7 +308,7 @@ def collect_read_entities(
                     text=word.get("text", ""),
                     pinyin=word.get("pinyin") or "",
                     translation=word.get("translation"),
-                    characterIds=list(word.get("characterIds") or []),
+                    characterIds=character_ids,
                     polygon=word.get("polygon", []),
                 )
             )
