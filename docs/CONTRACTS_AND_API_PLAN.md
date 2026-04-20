@@ -1,5 +1,9 @@
 # ChineseEreader Contracts And API Plan
 
+Implementation note:
+
+- The shipped endpoint reference now lives in `docs/API_ENDPOINTS.md`.
+
 ## Purpose
 
 This document defines the proposed app-facing contracts and API surface for the MVP, compares them to the current repo, and identifies where changes are needed.

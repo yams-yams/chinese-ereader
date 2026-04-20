@@ -49,9 +49,9 @@ What is still missing for `#16`:
 - a chapter index builder/loader in the backend
 - frontend boot logic that consumes the new API instead of the hard-coded manifest path
 
-## Implementation Approach
+## Implementation Checklist
 
-## 1. Add backend loaders for app-facing chapter data
+- [x] Add backend loaders for app-facing chapter data in `scripts/serve_reader.py`
 
 Add small file-backed helpers in `scripts/serve_reader.py` for:
 
@@ -65,7 +65,7 @@ These helpers should:
 - return JSON payloads rather than raw file paths leaking from callers
 - centralize shared error handling for missing chapters or missing derived models
 
-## 2. Implement the chapter discovery endpoint
+- [x] Implement the chapter discovery endpoint
 
 Add `GET /api/chapters` in `scripts/serve_reader.py`.
 
@@ -93,7 +93,7 @@ Recommended behavior:
 - set `hasRefineData` based on `refine-model.json`
 - sort deterministically by `series`, then `chapter`
 
-## 3. Implement chapter read/refine endpoints
+- [x] Implement chapter read/refine endpoints
 
 Add:
 
@@ -111,7 +111,7 @@ Important boundary:
 - the UI should not need a follow-up manifest request once it calls these endpoints
 - this issue should not recompose read/refine state on every request if the persisted models already exist
 
-## 4. Keep mutation endpoints aligned with the new API surface
+- [x] Keep mutation endpoints aligned with the new API surface
 
 The current mutation endpoints can remain in place during this issue:
 
@@ -129,7 +129,7 @@ Specific checks:
 
 This keeps `#16` focused on read/load APIs and avoids pulling mutation renaming into the same branch unless it is trivial.
 
-## 5. Start the shared-shell frontend boot path
+- [x] Start the shared-shell frontend boot path
 
 The docs make clear that the old page-based reader is temporary, while the shared shell is the target architecture.
 
@@ -153,7 +153,7 @@ That means this issue can land in one of two valid forms:
 1. Backend-complete plus a thin frontend bootstrap proving the API works.
 2. Backend-complete plus the first shared-shell loader if the UI split is already underway on top of this branch.
 
-## 6. Add API verification coverage
+- [x] Add API verification coverage
 
 Because the backend is file-backed and contract-driven, lightweight coverage is enough.
 
@@ -170,13 +170,24 @@ Verification can be done with either:
 - small Python tests against helper functions or the HTTP handler
 - a script-based smoke test using the local server
 
+- [x] Document the shipped endpoint surface and contracts after implementation
+
+Close the issue by updating the docs from proposed contracts to implemented contracts.
+
+Recommended scope:
+
+- update `docs/CONTRACTS_AND_API_PLAN.md` with the final shipped endpoint list and any implementation notes
+- add a compact endpoint reference if the API surface becomes easier to scan that way
+- include request/response shapes for every shipped GET and POST endpoint that the app relies on
+
 ## Suggested Work Order
 
-1. Add backend path/JSON helpers in `scripts/serve_reader.py`.
-2. Add `do_GET()` routing for chapter discovery and chapter data endpoints.
-3. Verify the endpoints against `chapter-001`.
-4. Add a minimal frontend bootstrap that fetches chapters and one chapter model through the API.
-5. Keep legacy boot working until the shared-shell refactor replaces it.
+- [x] Add backend path/JSON helpers in `scripts/serve_reader.py`.
+- [x] Add `do_GET()` routing for chapter discovery and chapter data endpoints.
+- [x] Verify the endpoints against `chapter-001`.
+- [x] Add a minimal frontend bootstrap that fetches chapters and one chapter model through the API.
+- [x] Keep legacy boot working until the shared-shell refactor replaces it.
+- [x] Update the API documentation to reflect the shipped endpoint surface and contracts.
 
 ## Branch Notes
 
@@ -241,3 +252,4 @@ Issue `#16` is complete when:
 - endpoint responses match the contracts in `docs/CONTRACTS_AND_API_PLAN.md`
 - chapter `chapter-001` can be loaded end-to-end from persisted app-facing models
 - the frontend no longer needs a separate manifest fetch once it requests `Read` or `Refine`
+- the shipped endpoint surface and request/response contracts are documented in-repo
