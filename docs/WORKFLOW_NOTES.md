@@ -4,6 +4,6 @@ This file is for small repo-specific workflow rules that are useful to keep expl
 
 ## Git
 
-- After creating a commit on a branch that is intended to stay in sync with GitHub, push it to `origin` promptly.
+- After creating a commit on a branch that is intended to stay in sync with GitHub, always push it to `origin`.
 - Prefer keeping `main` synchronized with `origin/main` to avoid local-only drift.
 - If local history intentionally diverges, surface that clearly before rebasing, force-pushing, or cherry-picking.
