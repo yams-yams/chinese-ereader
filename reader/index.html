@@ -10,12 +10,22 @@
     <div class="shell">
       <aside class="sidebar">
         <p class="eyebrow">ChineseEreader</p>
-        <h1>Read</h1>
-        <p class="lede">
+        <div class="mode-switch" role="group" aria-label="Reader mode">
+          <button class="mode-button" id="readModeButton" type="button" data-mode="read">
+            <span class="mode-button-label">Read</span>
+            <span class="mode-button-caption">Learn the chapter</span>
+          </button>
+          <button class="mode-button" id="refineModeButton" type="button" data-mode="refine">
+            <span class="mode-button-label">Refine</span>
+            <span class="mode-button-caption">Improve annotations</span>
+          </button>
+        </div>
+        <p class="lede" id="modeDescription">
           Read the chapter as one continuous scroll. Hover a character to inspect
           its word, and click to pin the containing sentence with pinyin and translation.
         </p>
         <div class="panel" id="chapterPanel"></div>
+        <div class="panel refine-panel" id="refinePanel" hidden></div>
         <div class="panel" id="wordPanel">
           <h2>Word</h2>
           <p class="empty">Hover a character.</p>

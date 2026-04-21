@@ -304,6 +304,77 @@ def review_file_path(series: str, chapter: str) -> Path:
     return REVIEW_ROOT / series / chapter / "patches.json"
 
 
+def remove_patch_entities(annotation: dict, page_id: str, patch_id: str) -> dict:
+    patch_prefix = f"{page_id}-{patch_id}"
+    patch_sentence_ids = {
+        str(sentence.get("id", ""))
+        for sentence in annotation.get("sentences", [])
+        if str(sentence.get("id", "")).startswith(f"{patch_prefix}-sentence-")
+        or sentence.get("source", {}).get("patchId") == patch_id
+    }
+    patch_word_ids = {
+        str(word.get("id", ""))
+        for word in annotation.get("words", [])
+        if str(word.get("id", "")).startswith(f"{patch_prefix}-word-")
+    }
+    patch_character_ids = {
+        str(character.get("id", ""))
+        for character in annotation.get("characters", [])
+        if str(character.get("id", "")).startswith(f"{patch_prefix}-char-")
+        or str(character.get("sentenceId", "")) in patch_sentence_ids
+    }
+
+    updated_annotation = dict(annotation)
+    updated_annotation["sentences"] = [
+        sentence
+        for sentence in annotation.get("sentences", [])
+        if str(sentence.get("id", "")) not in patch_sentence_ids
+        and sentence.get("source", {}).get("patchId") != patch_id
+    ]
+    updated_annotation["words"] = [
+        word
+        for word in annotation.get("words", [])
+        if str(word.get("id", "")) not in patch_word_ids
+        and not any(str(character_id) in patch_character_ids for character_id in word.get("characterIds", []))
+    ]
+    updated_annotation["characters"] = [
+        character
+        for character in annotation.get("characters", [])
+        if str(character.get("id", "")) not in patch_character_ids
+        and str(character.get("sentenceId", "")) not in patch_sentence_ids
+    ]
+    return updated_annotation
+
+
+def delete_patch(series: str, chapter: str, patch_id: str) -> tuple[dict, dict] | None:
+    path = review_file_path(series, chapter)
+    if not path.is_file():
+        return None
+
+    review = load_json_file(path)
+    patches = list(review.get("patches") or [])
+    target_patch = next((patch for patch in patches if str(patch.get("patch_id", "")) == patch_id), None)
+    if target_patch is None:
+        return None
+
+    updated_review = {
+        "series": series,
+        "chapter": chapter,
+        "patches": [patch for patch in patches if str(patch.get("patch_id", "")) != patch_id],
+    }
+    path.write_text(json.dumps(updated_review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    page_id = str(target_patch.get("page_id", "")).strip()
+    annotation_path = resolve_repo_path(ANNOTATIONS_ROOT, series, chapter, f"{page_id}.json")
+    if annotation_path and annotation_path.is_file():
+        annotation = load_json_file(annotation_path)
+        updated_annotation = remove_patch_entities(annotation, page_id, patch_id)
+        annotation_path.write_text(json.dumps(updated_annotation, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    rebuild_chapter_artifacts(series, chapter)
+    return updated_review, target_patch
+
+
 def run_command(command: list[str], *, input_text: Optional[str] = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         command,
@@ -472,6 +543,9 @@ class ReaderHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/restore-sentence":
             self.handle_set_sentence_status(payload, "active")
             return
+        if parsed.path == "/api/delete-patch":
+            self.handle_delete_patch(payload)
+            return
         if parsed.path == "/api/process-patch":
             self.handle_process_patch(payload)
             return
@@ -558,6 +632,36 @@ class ReaderHandler(SimpleHTTPRequestHandler):
             return
 
         json_response(self, HTTPStatus.OK, result)
+
+    def handle_delete_patch(self, payload: dict) -> None:
+        series = str(payload.get("series", "")).strip()
+        chapter = str(payload.get("chapter", "")).strip()
+        patch_id = str(payload.get("patchId", "")).strip()
+        if not series or not chapter or not patch_id:
+            self.send_error(HTTPStatus.BAD_REQUEST, "series, chapter, and patchId are required")
+            return
+
+        try:
+            result = delete_patch(series, chapter, patch_id)
+        except Exception as error:  # noqa: BLE001
+            json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+
+        if result is None:
+            self.send_error(HTTPStatus.NOT_FOUND, f"Unknown patchId: {patch_id}")
+            return
+
+        updated_review, deleted_patch = result
+        json_response(
+            self,
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "patchId": patch_id,
+                "patch": deleted_patch,
+                "patches": updated_review["patches"],
+            },
+        )
 
 
 def main():
