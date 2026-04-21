@@ -51,11 +51,11 @@ Conceptually, the app already has three concerns, but they are not cleanly separ
 - OCR/debug/refinement
 - pipeline processing and persistence
 
-The strongest architectural problem today is that reading and refinement are both implemented inside one frontend module.
+The strongest architectural problem in the legacy UI was that reading and refinement were both implemented inside one frontend module.
 
 ### Current UI Architecture
 
-The current UI is a single-screen application with:
+The legacy UI was a single-screen application with:
 
 - a sidebar containing chapter info, word info, sentence info, page sentence review, and OCR review tools
 - a main chapter surface showing all processed pages as a continuous scroll

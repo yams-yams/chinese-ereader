@@ -10,35 +10,36 @@
     <div class="shell">
       <aside class="sidebar">
         <p class="eyebrow">ChineseEreader</p>
-        <h1>Chapter Reader</h1>
+        <h1>Read</h1>
         <p class="lede">
-          Read the whole chapter as one continuous scroll. Hover a character to
-          inspect its segmented word and click to pin the containing sentence.
+          Read the chapter as one continuous scroll. Hover a character to inspect
+          its word, and click to pin the containing sentence with pinyin and translation.
         </p>
         <div class="panel" id="chapterPanel"></div>
         <div class="panel" id="wordPanel">
           <h2>Word</h2>
-          <p class="empty">Hover a character hotspot.</p>
+          <p class="empty">Hover a character.</p>
         </div>
         <div class="panel" id="sentencePanel">
           <h2>Sentence</h2>
-          <p class="empty">Click a character hotspot.</p>
+          <p class="empty">Click a character.</p>
         </div>
-        <div class="panel" id="pageReviewPanel">
-          <h2>Page Sentences</h2>
-          <p class="empty">Turn on debug mode and click within a page.</p>
+        <div class="panel notes-panel" id="notesPanel" aria-hidden="true">
+          <div class="notes-header">
+            <h2>Chapter Notes</h2>
+            <button class="notes-toggle" id="notesToggle" type="button" aria-expanded="false">
+              <span class="notes-toggle-state">Show</span>
+            </button>
+          </div>
+          <div class="notes-body">
+          <p class="empty">Chapter-level notes will appear here when available.</p>
+          </div>
         </div>
-        <div class="panel review-panel" id="reviewPanel"></div>
       </aside>
       <main class="stage">
         <div id="chapterStack" class="chapter-stack"></div>
       </main>
     </div>
-    <label class="debug-corner-toggle">
-      <input id="debugToggle" type="checkbox" />
-      <span>Debug OCR regions</span>
-    </label>
-    <input id="reviewImportInput" type="file" accept="application/json,.json" hidden />
     <div id="hoverTooltip" class="hover-tooltip" aria-hidden="true"></div>
     <script type="module" src="./app.js"></script>
   </body>

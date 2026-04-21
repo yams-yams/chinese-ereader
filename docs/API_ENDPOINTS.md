@@ -74,7 +74,7 @@ Current top-level shape:
 Notes:
 
 - this endpoint is chapter-first, not page-first
-- the current reader bridges `segments[].sourcePageId` back into the legacy page-centric UI during migration
+- the current reader renders the persisted read model directly and keeps the chapter surface continuous
 
 Errors:
 
@@ -109,7 +109,7 @@ Current top-level shape:
 Notes:
 
 - deleted sentences remain present here with `status: "deleted"`
-- the current reader uses this model as the source of truth for review/debug state and sentence status
+- `Refine` uses this model as the authoritative editable chapter state
 
 Errors:
 
@@ -222,5 +222,3 @@ The current reader now prefers:
 1. `GET /api/chapters`
 2. `GET /api/chapters/:series/:chapter/read`
 3. `GET /api/chapters/:series/:chapter/refine`
-
-If the GET API surface is unavailable, it falls back to the legacy manifest + page annotation boot path so the old local workflow keeps working during migration.
