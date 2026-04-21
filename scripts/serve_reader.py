@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CHAPTERS_ROOT = ROOT / "data" / "processed" / "chapters"
 ANNOTATIONS_ROOT = ROOT / "data" / "processed" / "annotations"
 PAGES_ROOT = ROOT / "data" / "processed" / "pages"
 REVIEW_ROOT = ROOT / "data" / "review"
@@ -47,6 +48,59 @@ def resolve_annotation_path(relative_path: str) -> Optional[Path]:
     except ValueError:
         return None
     return candidate
+
+
+def resolve_repo_path(root: Path, *parts: str) -> Optional[Path]:
+    candidate = root.joinpath(*parts).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def chapter_manifest_path(series: str, chapter: str) -> Optional[Path]:
+    return resolve_repo_path(CHAPTERS_ROOT, series, f"{chapter}.json")
+
+
+def chapter_model_path(series: str, chapter: str, model_name: str) -> Optional[Path]:
+    return resolve_repo_path(ANNOTATIONS_ROOT, series, chapter, f"{model_name}.json")
+
+
+def load_json_file(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def chapter_title(series: str, chapter: str, manifest: dict) -> str:
+    return str(manifest.get("title") or f"{series} / {chapter}")
+
+
+def list_chapters() -> list[dict]:
+    chapters = []
+    for manifest_file in sorted(CHAPTERS_ROOT.glob("*/*.json")):
+        try:
+            relative = manifest_file.relative_to(CHAPTERS_ROOT)
+        except ValueError:
+            continue
+        if len(relative.parts) != 2:
+            continue
+
+        series = relative.parts[0]
+        chapter = manifest_file.stem
+        manifest = load_json_file(manifest_file)
+        read_model = chapter_model_path(series, chapter, "read-model")
+        refine_model = chapter_model_path(series, chapter, "refine-model")
+        chapters.append(
+            {
+                "series": series,
+                "chapter": chapter,
+                "title": chapter_title(series, chapter, manifest),
+                "hasReadModel": bool(read_model and read_model.is_file()),
+                "hasRefineData": bool(refine_model and refine_model.is_file()),
+            }
+        )
+
+    return sorted(chapters, key=lambda item: (item["series"], item["chapter"]))
 
 
 def annotation_location(annotation_path: Path) -> tuple[str, str, str] | None:
@@ -398,6 +452,23 @@ class ReaderHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/chapters":
+            self.handle_list_chapters()
+            return
+
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) == 5 and parts[0] == "api" and parts[1] == "chapters":
+            series = parts[2]
+            chapter = parts[3]
+            mode = parts[4]
+            if mode in {"read", "refine"}:
+                self.handle_get_chapter_model(series, chapter, mode)
+                return
+
+        super().do_GET()
+
     def do_POST(self):
         parsed = urlparse(self.path)
 
@@ -420,6 +491,41 @@ class ReaderHandler(SimpleHTTPRequestHandler):
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
+
+    def handle_list_chapters(self) -> None:
+        try:
+            chapters = list_chapters()
+        except Exception as error:  # noqa: BLE001
+            json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+
+        json_response(self, HTTPStatus.OK, {"chapters": chapters})
+
+    def handle_get_chapter_model(self, series: str, chapter: str, mode: str) -> None:
+        manifest_path = chapter_manifest_path(series, chapter)
+        if manifest_path is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid chapter path")
+            return
+        if not manifest_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, f"Unknown chapter: {series}/{chapter}")
+            return
+
+        model_name = "read-model" if mode == "read" else "refine-model"
+        model_path = chapter_model_path(series, chapter, model_name)
+        if model_path is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid chapter path")
+            return
+        if not model_path.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, f"Missing {model_name}.json for {series}/{chapter}")
+            return
+
+        try:
+            payload = load_json_file(model_path)
+        except Exception as error:  # noqa: BLE001
+            json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+
+        json_response(self, HTTPStatus.OK, payload)
 
     def handle_set_sentence_status(self, payload: dict, status: str) -> None:
         annotation_path = resolve_annotation_path(str(payload.get("annotationPath", "")))

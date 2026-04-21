@@ -1,13 +1,17 @@
 const manifestUrl =
   "../data/processed/chapters/renjian-bailijin/chapter-001.json";
+const chaptersApiUrl = "/api/chapters";
 
 const PUNCTUATION_ONLY_RE = /^[\s.,!?;:'"()[\]{}\-_/\\|`~@#$%^&*+=<>，。！？、；：‘’“”《》〈〉「」『』（）【】…·—]+$/;
 
 const state = {
   manifest: null,
+  chapterIndex: [],
   annotations: new Map(),
   rawAnnotations: new Map(),
+  displayAnnotations: new Map(),
   enrichment: null,
+  dataSource: "legacy",
   hoveredWordKey: null,
   activeSentenceKey: null,
   selectedDebugPageId: null,
@@ -113,6 +117,138 @@ function imagePath(relativePath) {
 
 function pageEntry(pageId) {
   return state.manifest?.pages.find((page) => page.id === pageId) ?? null;
+}
+
+function pageIdForSegment(segment) {
+  return segment.sourcePageId ?? segment.id;
+}
+
+function annotationPathForPage(series, chapter, pageId) {
+  return `data/processed/annotations/${series}/${chapter}/${pageId}.json`;
+}
+
+function groupBySegment(items) {
+  const grouped = new Map();
+  for (const item of items ?? []) {
+    const bucket = grouped.get(item.segmentId) ?? [];
+    bucket.push(item);
+    grouped.set(item.segmentId, bucket);
+  }
+  return grouped;
+}
+
+function mapById(items) {
+  return new Map((items ?? []).map((item) => [item.id, item]));
+}
+
+function manifestFromApiModels(refineModel) {
+  const pages = refineModel.segments.map((segment) => {
+    const pageId = pageIdForSegment(segment);
+    return {
+      id: pageId,
+      image: segment.image,
+      annotation: annotationPathForPage(refineModel.series, refineModel.chapter, pageId),
+      segmentId: segment.id,
+      sourcePageId: pageId,
+      imageSize: segment.imageSize,
+    };
+  });
+
+  return {
+    series: refineModel.series,
+    chapter: refineModel.chapter,
+    title: refineModel.title ?? `${refineModel.series} / ${refineModel.chapter}`,
+    pageCount: pages.length,
+    pages,
+  };
+}
+
+function annotationMapFromModel(model, manifest) {
+  const sentencesBySegment = groupBySegment(model?.sentences ?? []);
+  const wordsBySegment = groupBySegment(model?.words ?? []);
+  const charactersBySegment = groupBySegment(model?.characters ?? []);
+  const annotations = new Map();
+
+  for (const page of manifest.pages) {
+    const segmentId = page.segmentId ?? page.id;
+    annotations.set(page.id, {
+      sourceImage: page.image,
+      imageSize: page.imageSize ?? null,
+      characters: (charactersBySegment.get(segmentId) ?? []).map((character) => ({ ...character })),
+      words: (wordsBySegment.get(segmentId) ?? []).map((word) => ({ ...word })),
+      sentences: (sentencesBySegment.get(segmentId) ?? []).map((sentence) => ({ ...sentence })),
+    });
+  }
+
+  return annotations;
+}
+
+function displayAnnotationFromApi(pageId, filteredRawAnnotation) {
+  const baseDisplayAnnotation = state.displayAnnotations.get(pageId);
+  if (!baseDisplayAnnotation) {
+    return filteredRawAnnotation;
+  }
+
+  const displayCharactersById = mapById(baseDisplayAnnotation.characters);
+  const displaySentencesById = mapById(baseDisplayAnnotation.sentences);
+
+  const characters = filteredRawAnnotation.characters.map((character) => ({
+    ...character,
+    ...displayCharactersById.get(character.id),
+    sentenceId: character.sentenceId,
+  }));
+  const keptCharacterIds = new Set(characters.map((character) => character.id));
+
+  const words = baseDisplayAnnotation.words.length > 0
+    ? baseDisplayAnnotation.words
+      .filter((word) => (word.characterIds ?? []).some((characterId) => keptCharacterIds.has(characterId)))
+      .map((word) => ({ ...word }))
+    : filteredRawAnnotation.words.map((word) => ({ ...word }));
+
+  const sentences = filteredRawAnnotation.sentences.map((sentence) => ({
+    ...sentence,
+    ...displaySentencesById.get(sentence.id),
+    status: sentence.status ?? displaySentencesById.get(sentence.id)?.status ?? "active",
+  }));
+
+  return {
+    ...filteredRawAnnotation,
+    characters,
+    words,
+    sentences,
+  };
+}
+
+function apiPatchesToReviewPatches(refineModel, manifest) {
+  const pageIdBySegmentId = new Map(
+    manifest.pages.map((page) => [page.segmentId ?? page.id, page.id]),
+  );
+
+  return (refineModel.patches ?? []).map((patch) => ({
+    ...patch,
+    page_id: pageIdBySegmentId.get(patch.segmentId) ?? patch.segmentId,
+  }));
+}
+
+function mergePatchesById(basePatches, localPatches) {
+  const merged = new Map((basePatches ?? []).map((patch) => [patch.patch_id, { ...patch }]));
+  for (const patch of localPatches ?? []) {
+    merged.set(patch.patch_id, { ...patch });
+  }
+  return [...merged.values()];
+}
+
+function currentChapterChoice() {
+  return state.chapterIndex.find(
+    (entry) => entry.series === state.manifest?.series && entry.chapter === state.manifest?.chapter,
+  ) ?? null;
+}
+
+function updateChapterUrl(series, chapter) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("series", series);
+  url.searchParams.set("chapter", chapter);
+  window.history.replaceState({}, "", url);
 }
 
 function tooltipForWord(word, fallbackText) {
@@ -303,6 +439,11 @@ function rebuildAnnotation(pageId) {
     return;
   }
 
+  if (state.dataSource === "api") {
+    state.annotations.set(pageId, displayAnnotationFromApi(pageId, filteredAnnotation));
+    return;
+  }
+
   state.annotations.set(pageId, enrichAnnotation(pageId, filteredAnnotation));
 }
 
@@ -431,6 +572,16 @@ async function reloadPageById(pageId) {
     return;
   }
 
+  if (state.dataSource === "api") {
+    await loadChapter(state.manifest.series, state.manifest.chapter);
+    rerenderChapterPreservingScroll();
+    refreshPanelsFromSelection();
+    renderPageReviewPanel();
+    renderReviewPanel();
+    renderInteractionState();
+    return;
+  }
+
   const page = pageEntry(pageId);
   if (page) {
     const rawAnnotation =
@@ -520,16 +671,20 @@ async function setSentenceStatusFromPage(pageId, sentenceId, nextStatus) {
   }
 
   const body = await response.json();
-  state.rawAnnotations.set(pageId, body.annotation);
-
-  if (nextStatus === "deleted" && sentenceKey(pageId, sentenceId) === state.activeSentenceKey) {
-    state.activeSentenceKey = null;
+  if (state.dataSource === "api") {
+    await loadChapter(state.manifest.series, state.manifest.chapter);
+  } else {
+    state.rawAnnotations.set(pageId, body.annotation);
+    if (nextStatus === "deleted" && sentenceKey(pageId, sentenceId) === state.activeSentenceKey) {
+      state.activeSentenceKey = null;
+    }
+    rebuildAnnotation(pageId);
   }
 
-  rebuildAnnotation(pageId);
   rerenderChapterPreservingScroll();
   refreshPanelsFromSelection();
   renderPageReviewPanel();
+  renderReviewPanel();
   renderInteractionState();
 }
 
@@ -542,6 +697,11 @@ async function restoreSentenceFromPage(pageId, sentenceId) {
 }
 
 async function loadEnrichment() {
+  if (state.dataSource === "api") {
+    state.enrichment = null;
+    return;
+  }
+
   const enrichmentPath = enrichmentPathForManifest(state.manifest);
   if (!enrichmentPath) {
     state.enrichment = null;
@@ -552,6 +712,13 @@ async function loadEnrichment() {
 }
 
 async function loadAnnotations() {
+  if (state.dataSource === "api") {
+    for (const page of state.manifest.pages) {
+      rebuildAnnotation(page.id);
+    }
+    return;
+  }
+
   const annotationPromises = state.manifest.pages.map(async (page) => {
     const rawAnnotation =
       (await loadJson(imagePath(page.annotation))) ?? {
@@ -567,12 +734,145 @@ async function loadAnnotations() {
   await Promise.all(annotationPromises);
 }
 
-function renderChapterPanel() {
-  elements.chapterPanel.innerHTML = panelMarkup("Chapter", [
-    { label: "Series", value: state.manifest.series },
-    { label: "Chapter", value: state.manifest.chapter },
-    { label: "Segments", value: String(state.manifest.pageCount) },
+function resetChapterData() {
+  state.annotations = new Map();
+  state.rawAnnotations = new Map();
+  state.displayAnnotations = new Map();
+  state.hoveredWordKey = null;
+  state.activeSentenceKey = null;
+  state.selectedDebugPageId = null;
+  state.review.patches = [];
+  state.review.draft = makeEmptyDraft();
+  state.review.anchorMode = "append";
+  state.review.statusMessage = "";
+  state.review.errorMessage = "";
+  state.review.needsReload = false;
+}
+
+async function loadChapterFromApi(series, chapter) {
+  const [readModel, refineModel] = await Promise.all([
+    loadJson(`/api/chapters/${series}/${chapter}/read`),
+    loadJson(`/api/chapters/${series}/${chapter}/refine`),
   ]);
+
+  if (!refineModel) {
+    throw new Error(`Could not load refine data for ${series} / ${chapter}.`);
+  }
+
+  resetChapterData();
+  state.dataSource = "api";
+  state.manifest = manifestFromApiModels(refineModel);
+  state.displayAnnotations = readModel
+    ? annotationMapFromModel(readModel, state.manifest)
+    : new Map();
+  state.rawAnnotations = annotationMapFromModel(refineModel, state.manifest);
+  state.review.patches = apiPatchesToReviewPatches(refineModel, state.manifest);
+  state.review.storageKey = `ocr-review:${state.manifest.series}:${state.manifest.chapter}`;
+  loadReviewStateFromStorage();
+  if (!state.review.draft.page_id) {
+    state.review.draft.page_id = state.manifest.pages[0]?.id ?? "";
+  }
+
+  updateChapterUrl(series, chapter);
+  await loadEnrichment();
+  await loadAnnotations();
+}
+
+async function loadChapterFromLegacyManifest() {
+  resetChapterData();
+  state.dataSource = "legacy";
+  state.manifest = await loadJson(manifestUrl);
+  state.review.storageKey = `ocr-review:${state.manifest.series}:${state.manifest.chapter}`;
+  state.review.patches = [];
+  loadReviewStateFromStorage();
+  if (!state.review.draft.page_id) {
+    state.review.draft.page_id = state.manifest.pages[0]?.id ?? "";
+  }
+
+  await loadEnrichment();
+  await loadAnnotations();
+}
+
+async function loadChapter(series, chapter) {
+  if (state.chapterIndex.length > 0) {
+    await loadChapterFromApi(series, chapter);
+    return;
+  }
+
+  await loadChapterFromLegacyManifest();
+}
+
+async function bootstrapChapterData() {
+  const chaptersPayload = await loadJson(chaptersApiUrl);
+  const chapters = Array.isArray(chaptersPayload?.chapters) ? chaptersPayload.chapters : [];
+  if (chapters.length === 0) {
+    state.chapterIndex = [];
+    await loadChapterFromLegacyManifest();
+    return;
+  }
+
+  state.chapterIndex = chapters;
+  const url = new URL(window.location.href);
+  const requestedSeries = url.searchParams.get("series");
+  const requestedChapter = url.searchParams.get("chapter");
+  const selectedChapter = chapters.find(
+    (entry) => entry.series === requestedSeries && entry.chapter === requestedChapter,
+  ) ?? chapters.find((entry) => entry.hasRefineData) ?? chapters[0];
+
+  await loadChapterFromApi(selectedChapter.series, selectedChapter.chapter);
+}
+
+function renderChapterPanel() {
+  const chapterOptions = state.chapterIndex.length > 0
+    ? state.chapterIndex
+      .map((chapter) => {
+        const value = `${chapter.series}::${chapter.chapter}`;
+        const selected = chapter.series === state.manifest.series && chapter.chapter === state.manifest.chapter;
+        const label = chapter.hasRefineData ? chapter.title : `${chapter.title} (refine unavailable)`;
+        return `<option value="${escapeHtml(value)}" ${selected ? "selected" : ""} ${chapter.hasRefineData ? "" : "disabled"}>${escapeHtml(label)}</option>`;
+      })
+      .join("")
+    : "";
+
+  const currentChoice = currentChapterChoice();
+  const pickerMarkup = chapterOptions
+    ? `
+      <label class="field">
+        <span class="label">Chapter Picker</span>
+        <select id="chapterSelect">${chapterOptions}</select>
+      </label>
+    `
+    : "";
+
+  const modeSummary = state.dataSource === "api"
+    ? (currentChoice?.hasReadModel ? "Read + Refine models" : "Refine model")
+    : "Manifest + page annotations";
+
+  elements.chapterPanel.innerHTML = `
+    <h2>Chapter</h2>
+    ${pickerMarkup}
+    <p><span class="label">Series</span>${escapeHtml(state.manifest.series)}</p>
+    <p><span class="label">Chapter</span>${escapeHtml(state.manifest.chapter)}</p>
+    <p><span class="label">Segments</span>${escapeHtml(String(state.manifest.pageCount))}</p>
+    <p><span class="label">Data Source</span>${escapeHtml(modeSummary)}</p>
+  `;
+
+  const chapterSelect = elements.chapterPanel.querySelector("#chapterSelect");
+  if (chapterSelect) {
+    chapterSelect.addEventListener("change", async (event) => {
+      const [series, chapter] = String(event.target.value).split("::");
+      if (!series || !chapter) {
+        return;
+      }
+      await loadChapter(series, chapter);
+      renderChapterPanel();
+      renderReviewPanel();
+      renderChapter();
+      refreshPanelsFromSelection();
+      renderPageReviewPanel();
+      renderInteractionState();
+    });
+  }
 }
 
 function polygonToStyle(polygon) {
@@ -947,7 +1247,10 @@ function loadReviewStateFromStorage() {
 
   try {
     const parsed = JSON.parse(raw);
-    state.review.patches = Array.isArray(parsed.patches) ? parsed.patches : [];
+    state.review.patches = mergePatchesById(
+      state.review.patches,
+      Array.isArray(parsed.patches) ? parsed.patches : [],
+    );
     state.review.draft = parsed.draft ? parsed.draft : makeEmptyDraft(state.manifest.pages[0]?.id ?? "");
     state.review.anchorMode = parsed.anchorMode || inferAnchorMode(state.review.draft);
   } catch (error) {
@@ -1858,13 +2161,6 @@ async function init() {
     }
   }
 
-  state.manifest = await loadJson(manifestUrl);
-  state.review.storageKey = `ocr-review:${state.manifest.series}:${state.manifest.chapter}`;
-  loadReviewStateFromStorage();
-  if (!state.review.draft.page_id) {
-    state.review.draft.page_id = state.manifest.pages[0]?.id ?? "";
-  }
-
   elements.reviewImportInput.addEventListener("change", (event) => {
     handleReviewImport(event.target.files?.[0] ?? null);
     event.target.value = "";
@@ -1890,9 +2186,8 @@ async function init() {
 
   renderEmptyPanels();
   renderEmptyPageReviewPanel();
+  await bootstrapChapterData();
   renderChapterPanel();
-  await loadEnrichment();
-  await loadAnnotations();
   renderReviewPanel();
   renderChapter();
   renderInteractionState();
