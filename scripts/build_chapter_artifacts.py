@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from chapter_artifact_rebuild import resolve_default_enrichment_path
 from chapter_artifact_models import (
     ChapterManifest,
     ChapterSegment,
@@ -71,13 +72,6 @@ def chapter_title(series: str, chapter: str) -> str:
 def segment_id_for_page_id(page_id: str) -> str:
     suffix = page_id.removeprefix("page-")
     return f"segment-{suffix}"
-
-
-def default_enrichment_path(chapter: str) -> Path | None:
-    match = re.fullmatch(r"chapter-(\d+)", chapter)
-    if not match:
-        return None
-    return TRANSLATED_ROOT / f"chapter{int(match.group(1))}.json"
 
 
 def manifest_path(series: str, chapter: str) -> Path:
@@ -450,7 +444,11 @@ def main() -> None:
     refine_model = build_refine_model(manifest, annotations, patches)
     write_json(annotations_dir / "refine-model.json", refine_model.model_dump(mode="json"))
 
-    enrichment_path = Path(args.enrichment) if args.enrichment else default_enrichment_path(args.chapter)
+    enrichment_path = (
+        Path(args.enrichment)
+        if args.enrichment
+        else resolve_default_enrichment_path(args.series, args.chapter)
+    )
     enrichment = load_enrichment(enrichment_path)
     if enrichment is not None and not args.skip_read_model:
         read_model = build_read_model(manifest, annotations, enrichment)

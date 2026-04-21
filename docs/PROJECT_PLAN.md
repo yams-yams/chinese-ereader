@@ -188,7 +188,7 @@ Current note:
 
 Current enrichment output:
 
-- `data/translated/chapter1.json`
+- `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
 
 Current top-level shape includes:
 

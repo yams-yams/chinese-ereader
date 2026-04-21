@@ -83,8 +83,6 @@ Meaningful intermediate work that should usually be preserved:
   - Saved OCR review/patch drafting data.
 - `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
   - Full-chapter Codex enrichment output.
-- `data/translated/chapter1.json`
-  - Legacy enrichment output still used by some migration steps.
 
 Rebuildable derived artifacts that are safe not to commit:
 
@@ -172,7 +170,7 @@ During long runs, the runner also streams and persists live Codex event JSONL pl
 Validate a saved local Codex JSON response against the chapter schema:
 
 ```bash
-.venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/chapter1.json
+.venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/renjian-bailijin/chapter-001/full-chapter-enrichment.json
 ```
 
 Build a prompt bundle for manually patched OCR misses:

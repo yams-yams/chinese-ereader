@@ -259,7 +259,7 @@ For observability during long runs, the runner also persists live Codex event JS
 Validate the saved JSON output:
 
 ```bash
-.venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/chapter1.json
+.venv/bin/python scripts/validate_full_chapter_output.py --input data/translated/renjian-bailijin/chapter-001/full-chapter-enrichment.json
 ```
 
 ## Working style guidance for future agents

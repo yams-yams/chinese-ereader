@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from build_codex_full_chapter_prompt import DEVELOPER_PROMPT, build_chapter_payload
+from chapter_artifact_rebuild import rebuild_chapter_artifacts
 from enrichment_schema import ChapterEnrichment, strict_json_schema
 from validate_full_chapter_output import validate_text
 
@@ -365,7 +366,9 @@ def main() -> None:
         raise SystemExit(1)
 
     if args.skip_validation:
+        rebuild_chapter_artifacts(args.series, args.chapter)
         run_record["status"] = "ok_unvalidated"
+        run_record["artifacts_rebuilt"] = True
         append_run_log(log_path, run_record)
         print(json.dumps(run_record, ensure_ascii=False, indent=2))
         return
@@ -381,6 +384,8 @@ def main() -> None:
 
     run_record["status"] = "ok"
     run_record["validation"] = validation_summary
+    rebuild_chapter_artifacts(args.series, args.chapter)
+    run_record["artifacts_rebuilt"] = True
     append_run_log(log_path, run_record)
     print(json.dumps(run_record, ensure_ascii=False, indent=2))
 

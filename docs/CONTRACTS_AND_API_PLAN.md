@@ -190,7 +190,7 @@ Current issues:
 
 Current source:
 
-- `data/translated/chapter1.json`
+- `data/translated/<series>/<chapter>/full-chapter-enrichment.json`
 
 Current shape includes:
 

@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
+from chapter_artifact_rebuild import rebuild_chapter_artifacts
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CHAPTERS_ROOT = ROOT / "data" / "processed" / "chapters"
@@ -317,22 +319,6 @@ def ensure_success(result: subprocess.CompletedProcess, step_name: str) -> None:
     if result.returncode == 0:
         return
     raise RuntimeError(f"{step_name} failed.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
-
-
-def rebuild_chapter_artifacts(series: str, chapter: str) -> None:
-    build_result = run_command(
-        [
-            str(PYTHON_BIN),
-            "scripts/build_chapter_artifacts.py",
-            "--series",
-            series,
-            "--chapter",
-            chapter,
-        ]
-    )
-    ensure_success(build_result, "Rebuild chapter artifacts")
-
-
 def process_patch_pipeline(payload: dict) -> dict:
     series = str(payload.get("series", "")).strip()
     chapter = str(payload.get("chapter", "")).strip()
