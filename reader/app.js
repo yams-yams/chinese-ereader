@@ -14,17 +14,27 @@ const PUNCTUATION_ONLY_RE = /^[\s.,!?;:'"()[\]{}\-_/\\|`~@#$%^&*+=<>，。！？
 
 const state = {
   chapterIndex: [],
+  currentChapter: null,
   mode: "read",
+  modeNotice: "",
   readModel: null,
   refineModel: null,
   readAnnotations: new Map(),
   refineAnnotations: new Map(),
   annotations: new Map(),
+  modelCache: {
+    read: new Map(),
+    refine: new Map(),
+  },
   positionAnchor: null,
   visibleSentenceKeys: new Set(),
   hoveredWordKey: null,
   activeSentenceKey: null,
   activePatchId: null,
+  refineSidebarMode: "view",
+  draftPatch: null,
+  draftBoundaryMode: false,
+  draftAnchorPickMode: false,
 };
 
 let elements;
@@ -49,6 +59,46 @@ function escapeHtml(value) {
 
 function imagePath(relativePath) {
   return `../${relativePath}`;
+}
+
+function chapterCacheKey(series, chapter) {
+  return `${series}::${chapter}`;
+}
+
+function chapterEntryFor(series, chapter) {
+  return state.chapterIndex.find((entry) => entry.series === series && entry.chapter === chapter) ?? null;
+}
+
+function currentChapterEntry() {
+  if (!state.currentChapter) {
+    return null;
+  }
+  return chapterEntryFor(state.currentChapter.series, state.currentChapter.chapter);
+}
+
+function modeAvailableForChapter(chapter, mode) {
+  if (!chapter) {
+    return false;
+  }
+  return mode === "refine" ? Boolean(chapter.hasRefineData) : Boolean(chapter.hasReadModel);
+}
+
+function cachedModel(mode, series, chapter) {
+  return state.modelCache[mode].get(chapterCacheKey(series, chapter)) ?? null;
+}
+
+function cacheModel(mode, model) {
+  if (!model?.series || !model?.chapter) {
+    return;
+  }
+  state.modelCache[mode].set(chapterCacheKey(model.series, model.chapter), model);
+}
+
+function invalidateChapterCaches(series, chapter, modes = ["read", "refine"]) {
+  const key = chapterCacheKey(series, chapter);
+  for (const mode of modes) {
+    state.modelCache[mode].delete(key);
+  }
 }
 
 function currentModel() {
@@ -119,20 +169,6 @@ function segmentForSentenceKey(sentenceKey, model = currentModel()) {
   return model?.segments.find((segment) => segment.id === parts.segmentId) ?? null;
 }
 
-function annotationPathForSentenceKey(sentenceKey) {
-  const parts = splitSentenceKey(sentenceKey);
-  if (!parts || !state.refineModel) {
-    return null;
-  }
-
-  const segment = segmentForSentenceKey(sentenceKey, state.refineModel);
-  if (!segment?.sourcePageId) {
-    return null;
-  }
-
-  return `data/processed/annotations/${state.refineModel.series}/${state.refineModel.chapter}/${segment.sourcePageId}.json`;
-}
-
 function sentenceStatusLabel(sentence) {
   return (sentence?.status ?? "active") === "deleted" ? "Deleted" : "Active";
 }
@@ -153,6 +189,187 @@ function patchAnchorLabel(patch) {
 
 function patchTranscript(patch) {
   return patch?.user_transcript || patch?.ocr_candidate || "No transcript yet.";
+}
+
+function segmentForId(segmentId, model = currentModel()) {
+  return model?.segments.find((segment) => segment.id === segmentId) ?? null;
+}
+
+function sourcePageIdForSegmentId(segmentId) {
+  return state.refineModel?.segments.find((segment) => segment.id === segmentId)?.sourcePageId ?? null;
+}
+
+function imagePathForSegmentId(segmentId) {
+  return state.refineModel?.segments.find((segment) => segment.id === segmentId)?.image ?? null;
+}
+
+function reviewPatchFromRefinePatch(patch) {
+  const pageId = sourcePageIdForSegmentId(patch.segmentId);
+  if (!pageId) {
+    return null;
+  }
+
+  return {
+    patch_id: patch.patch_id,
+    page_id: pageId,
+    kind: patch.kind ?? "missing_region",
+    region: patch.region ?? { polygon: [] },
+    text_flow: patch.text_flow ?? { mode: "vertical_rl", guide: [] },
+    ocr_candidate: patch.ocr_candidate ?? "",
+    user_transcript: patch.user_transcript ?? "",
+    anchor: patch.anchor ?? {
+      insert_after_sentence_id: null,
+      insert_before_sentence_id: null,
+    },
+    notes: patch.notes ?? "",
+  };
+}
+
+function autoGuideForPolygon(polygon, flowMode = "vertical_rl") {
+  if (!polygon?.length) {
+    return [];
+  }
+
+  const xs = polygon.map((point) => point.x);
+  const ys = polygon.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const midX = (minX + maxX) / 2;
+  const midY = (minY + maxY) / 2;
+
+  if (flowMode.startsWith("vertical")) {
+    return [
+      { x: maxX, y: midY },
+      { x: minX, y: midY },
+    ];
+  }
+
+  return [
+    { x: midX, y: maxY },
+    { x: midX, y: minY },
+  ];
+}
+
+function draftPatchGeometry(draftPatch) {
+  if (!draftPatch?.region?.polygon?.length) {
+    return null;
+  }
+  if (draftPatch.region.polygon.length >= 3) {
+    return polygonToStyle(draftPatch.region.polygon);
+  }
+  return null;
+}
+
+function renderDraftPoints(overlay, draftPatch, segmentId) {
+  for (const point of overlay.querySelectorAll(".draft-point")) {
+    point.remove();
+  }
+
+  if (!draftPatch || draftPatch.segmentId !== segmentId) {
+    return;
+  }
+
+  for (const point of draftPatch.region?.polygon ?? []) {
+    const marker = document.createElement("div");
+    marker.className = "draft-point";
+    marker.style.left = `${point.x * 100}%`;
+    marker.style.top = `${(1 - point.y) * 100}%`;
+    overlay.appendChild(marker);
+  }
+}
+
+function draftPatchKey() {
+  return state.draftPatch?.patch_id ?? "draft-patch";
+}
+
+function createDraftPatchFromSentence(sentence) {
+  const segment = segmentForId(sentence.segmentId, state.refineModel);
+  if (!segment) {
+    return null;
+  }
+
+  return {
+    patch_id: draftPatchKey(),
+    segmentId: sentence.segmentId,
+    kind: "missing_region",
+    region: {
+      polygon: [],
+    },
+    text_flow: {
+      mode: "vertical_rl",
+      guide: [],
+    },
+    ocr_candidate: "",
+    user_transcript: "",
+    anchorMode: "after",
+    anchor: {
+      insert_after_sentence_id: sentence.id,
+      insert_before_sentence_id: null,
+    },
+    notes: "",
+    sourcePageId: segment.sourcePageId,
+  };
+}
+
+function createEmptyDraftPatch() {
+  return {
+    patch_id: draftPatchKey(),
+    segmentId: null,
+    kind: "missing_region",
+    region: {
+      polygon: [],
+    },
+    text_flow: {
+      mode: "vertical_rl",
+      guide: [],
+    },
+    ocr_candidate: "",
+    user_transcript: "",
+    anchorMode: "append",
+    anchor: {
+      insert_after_sentence_id: null,
+      insert_before_sentence_id: null,
+    },
+    notes: "",
+    sourcePageId: null,
+  };
+}
+
+function draftPatchStatusText(draftPatch) {
+  if (!draftPatch) {
+    return "";
+  }
+  if (state.draftBoundaryMode) {
+    return "Click points on the page to outline the patch boundary, then finish the boundary.";
+  }
+  if (!draftPatch.segmentId) {
+    return "Start boundary drawing, then click points on the page where the missing text should be patched.";
+  }
+  if (!draftPatch.region?.polygon?.length) {
+    return "Start boundary drawing to outline the missing-text region.";
+  }
+  if (!draftPatch.user_transcript.trim()) {
+    return "Add the accepted transcript before processing.";
+  }
+  return "Draft is ready to process.";
+}
+
+function patchAnchorDraftLabel(anchor, anchorMode = "append") {
+  if (anchor?.insert_before_sentence_id) {
+    return `Before ${anchor.insert_before_sentence_id}`;
+  }
+  if (anchor?.insert_after_sentence_id) {
+    return `After ${anchor.insert_after_sentence_id}`;
+  }
+  if (anchorMode === "before") {
+    return "Before sentence (select one)";
+  }
+  if (anchorMode === "after") {
+    return "After sentence (select one)";
+  }
+  return "Append at end";
 }
 
 function panelMarkup(title, fields) {
@@ -195,7 +412,8 @@ function mapById(items) {
 
 function chapterTitle() {
   const model = currentModel();
-  return model?.title ?? `${model?.series ?? ""} / ${model?.chapter ?? ""}`.trim();
+  const chapter = currentChapterEntry();
+  return model?.title ?? chapter?.title ?? `${state.currentChapter?.series ?? ""} / ${state.currentChapter?.chapter ?? ""}`.trim();
 }
 
 function segmentEntries() {
@@ -495,11 +713,13 @@ function restoreTopVisibleSentenceAnchor(anchor) {
 
 function renderModeControls() {
   const isRead = state.mode === "read";
+  const chapter = currentChapterEntry();
   elements.readModeButton.classList.toggle("active", isRead);
   elements.refineModeButton.classList.toggle("active", !isRead);
   elements.readModeButton.setAttribute("aria-pressed", isRead ? "true" : "false");
   elements.refineModeButton.setAttribute("aria-pressed", !isRead ? "true" : "false");
-  elements.refineModeButton.disabled = !state.refineModel;
+  elements.readModeButton.disabled = !modeAvailableForChapter(chapter, "read");
+  elements.refineModeButton.disabled = !modeAvailableForChapter(chapter, "refine");
   elements.modeDescription.textContent = currentModeLede();
   document.body.dataset.mode = state.mode;
 }
@@ -555,6 +775,73 @@ function patchDetailMarkup(patch) {
       <p><span class="label">Transcript</span>${escapeHtml(patchTranscript(patch))}</p>
       <p><span class="label">OCR Candidate</span>${escapeHtml(patch.ocr_candidate || "Pending")}</p>
       <p><span class="label">Notes</span>${escapeHtml(patch.notes || "None")}</p>
+    </div>
+  `;
+}
+
+function draftPatchDetailMarkup(draftPatch, sentenceOptions) {
+  const draftTitle = draftPatch.segmentId || "New patch";
+  const anchorMode = draftPatch.anchorMode
+    ?? (draftPatch.anchor?.insert_before_sentence_id
+      ? "before"
+      : draftPatch.anchor?.insert_after_sentence_id
+        ? "after"
+        : "append");
+  const anchorSentenceId = draftPatch.anchor?.insert_before_sentence_id
+    ?? draftPatch.anchor?.insert_after_sentence_id
+    ?? "";
+  const boundaryButtonLabel = state.draftBoundaryMode ? "Finish boundary" : "Start boundary drawing";
+  const anchorPickValue = state.draftAnchorPickMode ? "__pick_from_page__" : anchorSentenceId;
+
+  return `
+    <div class="refine-activity refine-draft-detail">
+      <div class="refine-detail-header">
+        <div>
+          <p class="refine-kicker">Create Patch</p>
+          <h3>${escapeHtml(draftTitle)}</h3>
+        </div>
+        <span class="status-pill active">Local draft</span>
+      </div>
+      <p><span class="label">Anchor</span>${escapeHtml(patchAnchorDraftLabel(draftPatch.anchor, anchorMode))}</p>
+      <p><span class="label">Status</span>${escapeHtml(draftPatchStatusText(draftPatch))}</p>
+      <div class="field">
+        <span class="label">Reading Direction</span>
+        <select data-draft-field="text-flow-mode">
+          <option value="vertical_rl" ${draftPatch.text_flow.mode === "vertical_rl" ? "selected" : ""}>Vertical Right-to-Left</option>
+          <option value="horizontal_ltr" ${draftPatch.text_flow.mode === "horizontal_ltr" ? "selected" : ""}>Horizontal Left-to-Right</option>
+        </select>
+      </div>
+      <div class="field">
+        <span class="label">Anchor Mode</span>
+        <select data-draft-field="anchor-mode">
+          <option value="after" ${anchorMode === "after" ? "selected" : ""}>After sentence</option>
+          <option value="before" ${anchorMode === "before" ? "selected" : ""}>Before sentence</option>
+          <option value="append" ${anchorMode === "append" ? "selected" : ""}>Append at end</option>
+        </select>
+      </div>
+      <div class="field">
+        <span class="label">Anchor Sentence</span>
+        <select data-draft-field="anchor-sentence" ${anchorMode === "append" ? "disabled" : ""}>
+          <option value="__pick_from_page__" ${anchorPickValue === "__pick_from_page__" ? "selected" : ""}>I'll select from the page</option>
+          <option value="">Select sentence</option>
+          ${sentenceOptions}
+        </select>
+      </div>
+      <label class="field">
+        <span class="label">Accepted Transcript</span>
+        <textarea data-draft-field="user-transcript" rows="3" placeholder="Enter the missing text">${escapeHtml(draftPatch.user_transcript ?? "")}</textarea>
+      </label>
+      <label class="field">
+        <span class="label">Notes</span>
+        <textarea data-draft-field="notes" rows="2" placeholder="Optional notes">${escapeHtml(draftPatch.notes ?? "")}</textarea>
+      </label>
+      <div class="draft-actions">
+        <button class="draft-button" type="button" data-draft-action="toggle-boundary">${boundaryButtonLabel}</button>
+        <button class="draft-button" type="button" data-draft-action="undo-point" ${draftPatch.region?.polygon?.length ? "" : "disabled"}>Undo point</button>
+        <button class="draft-button" type="button" data-draft-action="clear-region" ${draftPatch.region?.polygon?.length ? "" : "disabled"}>Clear region</button>
+        <button class="draft-button" type="button" data-draft-action="cancel">Cancel draft</button>
+        <button class="draft-button primary" type="button" data-draft-action="process">Process patch</button>
+      </div>
     </div>
   `;
 }
@@ -618,8 +905,11 @@ function renderRefinePatchCard(patch) {
 
 function renderRefinePanel() {
   const refineModel = state.refineModel;
+  const sidebarMode = state.refineSidebarMode ?? "view";
+  const isCreateMode = sidebarMode === "create";
   const annotations = currentAnnotations();
   const currentPatch = refinePatchForId(state.activePatchId ?? "");
+  const draftPatch = state.draftPatch;
   const currentSentence = currentPatch
     ? null
     : (refineSentenceRecordForKey(state.activeSentenceKey ?? "") ?? sentenceRecordForKey(state.activeSentenceKey ?? "", annotations));
@@ -637,6 +927,25 @@ function renderRefinePanel() {
 
   const deletedCount = sentences.filter((sentence) => (sentence.status ?? "active") === "deleted").length;
   const patchCount = refineModel?.patches?.length ?? 0;
+  const sentenceOptions = (refineModel?.sentences ?? [])
+    .filter((sentence) => (sentence.status ?? "active") !== "deleted")
+    .map((sentence) => {
+      const anchorSentenceId = draftPatch?.anchor?.insert_before_sentence_id
+        ?? draftPatch?.anchor?.insert_after_sentence_id
+        ?? "";
+      const selected = sentence.id === anchorSentenceId ? "selected" : "";
+      return `<option value="${escapeHtml(sentence.id)}" ${selected}>${escapeHtml(`${sentence.segmentId} · ${sentence.id} · ${sentence.text}`)}</option>`;
+    })
+    .join("");
+
+  const draftMarkup = draftPatch
+    ? draftPatchDetailMarkup(draftPatch, sentenceOptions)
+    : `
+      <div class="refine-activity refine-draft-empty">
+        <p class="refine-kicker">Create Patch</p>
+        <p class="empty">Start a local patch draft, then draw the missing-text boundary directly on the page.</p>
+      </div>
+    `;
 
   const visibleSections = visibleSentences.length > 0
     ? (refineModel?.segments ?? [])
@@ -652,7 +961,7 @@ function renderRefinePanel() {
         return `
           <section class="refine-section">
             <div class="refine-section-header">
-              <h3>${escapeHtml(segment.id)}</h3>
+              <h3>Visible Sentences</h3>
               <span>${escapeHtml(String(segmentSentences.length))} visible</span>
             </div>
             <div class="refine-sentence-list">
@@ -683,30 +992,56 @@ function renderRefinePanel() {
     `
     : "";
 
-  const detailMarkup = currentPatch
-    ? patchDetailMarkup(currentPatch)
+  const detailMarkup = isCreateMode
+    ? draftMarkup
+    : currentPatch
+      ? patchDetailMarkup(currentPatch)
     : currentSentence
       ? sentenceDetailMarkup(currentSentence)
       : "";
 
+  const viewSectionMarkup = `
+    <section class="refine-workspace">
+      <div class="refine-workspace-header">
+        <div>
+          <h3>View Sentences + Patches</h3>
+        </div>
+      </div>
+      <div class="refine-summary">
+        <p><span class="label">Segments</span>${escapeHtml(String(refineModel?.segments?.length ?? 0))}</p>
+        <p><span class="label">Sentences</span>${escapeHtml(String(sentences.length))}</p>
+        <p><span class="label">Deleted</span>${escapeHtml(String(deletedCount))}</p>
+        <p><span class="label">Patches</span>${escapeHtml(String(patchCount))}</p>
+      </div>
+      ${detailMarkup}
+      <section class="refine-visible">
+        ${visibleSections}
+      </section>
+      ${patchList}
+      <div class="refine-workspace-actions">
+        <button class="draft-button primary" type="button" data-refine-action="enter-create">Create a New Patch</button>
+      </div>
+    </section>
+  `;
+
+  const createSectionMarkup = `
+    <section class="refine-workspace refine-workspace-create">
+      <div class="refine-workspace-header">
+        <div>
+          <h3>Create Patch</h3>
+        </div>
+      </div>
+      ${draftMarkup}
+      <div class="refine-workspace-actions">
+        <button class="draft-button" type="button" data-refine-action="enter-view">Back to Sentences + Patches</button>
+      </div>
+    </section>
+  `;
+
   elements.refinePanel.innerHTML = `
     <h2>Refine</h2>
     <p class="empty">Inspect annotation quality, deleted sentences, and patch-ready chapter state.</p>
-    <div class="refine-summary">
-      <p><span class="label">Segments</span>${escapeHtml(String(refineModel?.segments?.length ?? 0))}</p>
-      <p><span class="label">Sentences</span>${escapeHtml(String(sentences.length))}</p>
-      <p><span class="label">Deleted</span>${escapeHtml(String(deletedCount))}</p>
-      <p><span class="label">Patches</span>${escapeHtml(String(patchCount))}</p>
-    </div>
-    ${detailMarkup}
-    <section class="refine-visible">
-      <div class="refine-section-header">
-        <h3>Visible now</h3>
-        <span>${escapeHtml(String(visibleSentences.length))}</span>
-      </div>
-      ${visibleSections}
-    </section>
-    ${patchList}
+    ${isCreateMode ? createSectionMarkup : viewSectionMarkup}
   `;
 }
 
@@ -770,6 +1105,7 @@ function focusPatch(patchId, { scrollSidebar = false } = {}) {
     return;
   }
 
+  enterRefineViewMode({ preserveDraft: true, rerenderPanel: false, rerenderInteraction: false });
   state.activePatchId = patchId;
   state.activeSentenceKey = null;
   state.hoveredWordKey = null;
@@ -787,14 +1123,251 @@ function focusPatch(patchId, { scrollSidebar = false } = {}) {
   });
 }
 
+function updateDraftPatch(updater, { rerenderPanel = true, rerenderInteraction = true } = {}) {
+  if (!state.draftPatch) {
+    return;
+  }
+
+  state.draftPatch = updater(JSON.parse(JSON.stringify(state.draftPatch)));
+  if (rerenderPanel) {
+    renderModePanels();
+  }
+  if (rerenderInteraction) {
+    renderInteractionState();
+  }
+}
+
+function cancelDraftPatch() {
+  state.draftPatch = null;
+  enterRefineViewMode({ preserveDraft: false });
+}
+
+function enterRefineViewMode({ preserveDraft = true, rerenderPanel = true, rerenderInteraction = true } = {}) {
+  state.refineSidebarMode = "view";
+  state.draftBoundaryMode = false;
+  state.draftAnchorPickMode = false;
+  if (!preserveDraft) {
+    state.draftPatch = null;
+  }
+  if (rerenderPanel) {
+    renderModePanels();
+  }
+  if (rerenderInteraction) {
+    renderInteractionState();
+  }
+}
+
+function enterRefineCreateMode({ ensureDraft = true } = {}) {
+  if (state.mode !== "refine") {
+    return;
+  }
+
+  state.refineSidebarMode = "create";
+  if (ensureDraft && !state.draftPatch) {
+    state.draftPatch = createEmptyDraftPatch();
+  }
+  state.draftBoundaryMode = false;
+  state.draftAnchorPickMode = false;
+  state.hoveredWordKey = null;
+  renderModePanels();
+  renderInteractionState();
+}
+
+function updateDraftAnchor(mode, sentenceId) {
+  state.draftAnchorPickMode = false;
+  updateDraftPatch((draftPatch) => {
+    if (mode === "before") {
+      draftPatch.anchorMode = "before";
+      draftPatch.anchor = {
+        insert_before_sentence_id: sentenceId || null,
+        insert_after_sentence_id: null,
+      };
+    } else if (mode === "append") {
+      draftPatch.anchorMode = "append";
+      draftPatch.anchor = {
+        insert_before_sentence_id: null,
+        insert_after_sentence_id: null,
+      };
+    } else {
+      draftPatch.anchorMode = "after";
+      draftPatch.anchor = {
+        insert_before_sentence_id: null,
+        insert_after_sentence_id: sentenceId || null,
+      };
+    }
+    return draftPatch;
+  });
+}
+
+function toggleDraftBoundaryMode() {
+  if (!state.draftPatch) {
+    return;
+  }
+
+  if (state.draftBoundaryMode) {
+    if ((state.draftPatch.region?.polygon?.length ?? 0) < 3) {
+      throw new Error("Add at least three points before finishing the boundary.");
+    }
+    updateDraftPatch((draftPatch) => ({
+      ...draftPatch,
+      text_flow: {
+        ...draftPatch.text_flow,
+        guide: autoGuideForPolygon(draftPatch.region?.polygon ?? [], draftPatch.text_flow.mode),
+      },
+    }));
+    state.draftBoundaryMode = false;
+    renderModePanels();
+    renderInteractionState();
+    return;
+  }
+
+  state.draftBoundaryMode = true;
+  state.draftAnchorPickMode = false;
+  renderModePanels();
+  renderInteractionState();
+}
+
+function appendDraftBoundaryPoint(segmentId, point) {
+  if (!state.draftPatch) {
+    return;
+  }
+
+  updateDraftPatch((draftPatch) => {
+    const nextSegmentId = draftPatch.segmentId ?? segmentId;
+    if (draftPatch.segmentId && draftPatch.segmentId !== segmentId) {
+      throw new Error("Finish or clear the current boundary before drawing on a different segment.");
+    }
+
+    const nextPolygon = [...(draftPatch.region?.polygon ?? []), point];
+    return {
+      ...draftPatch,
+      segmentId: nextSegmentId,
+      sourcePageId: sourcePageIdForSegmentId(nextSegmentId),
+      region: {
+        polygon: nextPolygon,
+      },
+      text_flow: {
+        ...draftPatch.text_flow,
+        guide: nextPolygon.length >= 3
+          ? autoGuideForPolygon(nextPolygon, draftPatch.text_flow.mode)
+          : [],
+      },
+    };
+  });
+}
+
+function undoDraftBoundaryPoint() {
+  if (!state.draftPatch) {
+    return;
+  }
+
+  updateDraftPatch((draftPatch) => {
+    const nextPolygon = (draftPatch.region?.polygon ?? []).slice(0, -1);
+    return {
+      ...draftPatch,
+      segmentId: nextPolygon.length > 0 ? draftPatch.segmentId : null,
+      sourcePageId: nextPolygon.length > 0 ? draftPatch.sourcePageId : null,
+      region: {
+        polygon: nextPolygon,
+      },
+      text_flow: {
+        ...draftPatch.text_flow,
+        guide: nextPolygon.length >= 3
+          ? autoGuideForPolygon(nextPolygon, draftPatch.text_flow.mode)
+          : [],
+      },
+    };
+  });
+}
+
+function clientPointToNormalizedPoint(event, frame) {
+  const rect = frame.getBoundingClientRect();
+  const x = (event.clientX - rect.left) / rect.width;
+  const y = 1 - ((event.clientY - rect.top) / rect.height);
+  return {
+    x: Math.min(1, Math.max(0, x)),
+    y: Math.min(1, Math.max(0, y)),
+  };
+}
+
+function addDraftBoundaryPoint(event, frame) {
+  if (state.mode !== "refine" || state.refineSidebarMode !== "create" || !state.draftPatch || !state.draftBoundaryMode) {
+    return;
+  }
+
+  event.preventDefault();
+  appendDraftBoundaryPoint(frame.dataset.segmentId, clientPointToNormalizedPoint(event, frame));
+}
+
+async function processDraftPatch() {
+  if (state.mode !== "refine" || !state.draftPatch || !state.currentChapter) {
+    return;
+  }
+
+  if (!state.draftPatch.region?.polygon?.length) {
+    throw new Error("Draw a patch region before processing.");
+  }
+  if (!state.draftPatch.user_transcript.trim()) {
+    throw new Error("Add the accepted transcript before processing.");
+  }
+
+  const imagePath = imagePathForSegmentId(state.draftPatch.segmentId);
+  const pageId = sourcePageIdForSegmentId(state.draftPatch.segmentId);
+  if (!imagePath || !pageId) {
+    throw new Error("Could not resolve the draft patch segment.");
+  }
+
+  const reviewPatches = (state.refineModel?.patches ?? [])
+    .map((patch) => reviewPatchFromRefinePatch(patch))
+    .filter(Boolean);
+  const draftPatch = {
+    ...state.draftPatch,
+    page_id: pageId,
+  };
+
+  const response = await fetch("/api/process-patch", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      series: state.currentChapter.series,
+      chapter: state.currentChapter.chapter,
+      imagePath,
+      patch: draftPatch,
+      patches: reviewPatches,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Could not process draft patch ${draftPatch.patch_id}.`);
+  }
+
+  const payload = await response.json();
+  const nextPatchId = payload.patch?.patch_id ?? draftPatch.patch_id;
+  const scrollTop = window.scrollY;
+  cancelDraftPatch();
+  invalidateChapterCaches(state.currentChapter.series, state.currentChapter.chapter);
+  await loadChapterFromApi(state.currentChapter.series, state.currentChapter.chapter, {
+    preferredMode: "refine",
+    activeSentenceKey: null,
+    activePatchId: nextPatchId,
+    preservePosition: true,
+    restoreScrollTop: scrollTop,
+    forceModes: ["read", "refine"],
+  });
+}
+
 async function mutateSentenceStatus(sentenceKey, status) {
   if (state.mode !== "refine") {
     return;
   }
 
-  const annotationPath = annotationPathForSentenceKey(sentenceKey);
+  const parts = splitSentenceKey(sentenceKey);
   const sentence = refineSentenceRecordForKey(sentenceKey);
-  if (!annotationPath || !sentence) {
+  const currentChapter = state.currentChapter;
+  if (!parts || !sentence || !currentChapter) {
     return;
   }
 
@@ -810,7 +1383,9 @@ async function mutateSentenceStatus(sentenceKey, status) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      annotationPath,
+      series: currentChapter.series,
+      chapter: currentChapter.chapter,
+      segmentId: parts.segmentId,
       sentenceId: sentence.id,
     }),
   });
@@ -821,17 +1396,16 @@ async function mutateSentenceStatus(sentenceKey, status) {
   }
 
   const currentSelection = sentenceKey;
-  const currentChapter = currentModel();
-  if (!currentChapter) {
-    return;
-  }
   const scrollTop = window.scrollY;
+  invalidateChapterCaches(currentChapter.series, currentChapter.chapter);
 
   await loadChapterFromApi(currentChapter.series, currentChapter.chapter, {
+    preferredMode: "refine",
     activeSentenceKey: currentSelection,
     activePatchId: null,
     preservePosition: true,
     restoreScrollTop: scrollTop,
+    forceModes: ["refine"],
   });
 }
 
@@ -868,12 +1442,15 @@ async function mutatePatchDelete(patchId) {
     throw new Error(errorText || `Could not delete patch ${patch.patch_id}.`);
   }
   const scrollTop = window.scrollY;
+  invalidateChapterCaches(currentChapter.series, currentChapter.chapter);
 
   await loadChapterFromApi(currentChapter.series, currentChapter.chapter, {
+    preferredMode: "refine",
     activeSentenceKey: null,
     activePatchId: null,
     preservePosition: true,
     restoreScrollTop: scrollTop,
+    forceModes: ["refine"],
   });
 }
 
@@ -898,30 +1475,21 @@ function renderModePanels() {
   }
 }
 
-function setMode(nextMode, { preservePosition = true } = {}) {
-  if (nextMode === "refine" && !state.refineModel) {
-    return;
-  }
-
-  if (state.mode === nextMode) {
+async function setMode(nextMode, { preservePosition = true } = {}) {
+  if (!state.currentChapter) {
     return;
   }
 
   const anchor = preservePosition ? captureTopVisibleSentenceAnchor() : null;
-  state.mode = nextMode;
   state.hoveredWordKey = null;
-  state.activePatchId = null;
-  state.activeSentenceKey = anchor?.sentenceKey ?? null;
-  state.positionAnchor = anchor ?? state.positionAnchor;
-  syncActiveAnnotations();
-  renderModeControls();
-  renderModePanels();
-  renderChapterPanel();
-  renderChapter();
-  renderInteractionState();
-  updateChapterUrl(currentModel()?.series ?? "", currentModel()?.chapter ?? "", state.mode);
-  queueViewportAnchorSync();
-  requestAnimationFrame(() => restoreTopVisibleSentenceAnchor(anchor));
+  hideHoverTooltip();
+  await loadChapterFromApi(state.currentChapter.series, state.currentChapter.chapter, {
+    preferredMode: nextMode,
+    activeSentenceKey: null,
+    activePatchId: null,
+    preservePosition,
+    positionAnchor: anchor,
+  });
 }
 
 function updateWordPanel(word) {
@@ -1073,6 +1641,23 @@ function updateFocusOverlays() {
       patchFocus.dataset.patchId = "";
       applyGeometry(patchFocus, { left: "0%", top: "0%", width: "0%", height: "0%" });
     }
+
+    const draftFocus = frame.querySelector(".draft-focus");
+    const draftPatch = state.refineSidebarMode === "create" ? state.draftPatch : null;
+    const overlay = frame.querySelector(".overlay");
+    if (overlay) {
+      renderDraftPoints(overlay, draftPatch, segmentId);
+    }
+    if (draftFocus && draftPatch?.segmentId === segmentId && draftPatch.region?.polygon?.length) {
+      const geometry = draftPatchGeometry(draftPatch);
+      if (geometry) {
+        draftFocus.dataset.draftPatchId = draftPatch.patch_id;
+        applyGeometry(draftFocus, geometry);
+      }
+    } else if (draftFocus) {
+      draftFocus.dataset.draftPatchId = "";
+      applyGeometry(draftFocus, { left: "0%", top: "0%", width: "0%", height: "0%" });
+    }
   }
 }
 
@@ -1084,11 +1669,21 @@ function renderInteractionState() {
   }
 
   for (const focus of elements.chapterStack.querySelectorAll(".sentence-focus")) {
-    focus.classList.toggle("visible", focus.dataset.sentenceKey === state.activeSentenceKey);
+    focus.classList.toggle("visible", state.mode === "refine"
+      ? state.refineSidebarMode === "view" && focus.dataset.sentenceKey === state.activeSentenceKey
+      : focus.dataset.sentenceKey === state.activeSentenceKey);
   }
 
   for (const focus of elements.chapterStack.querySelectorAll(".patch-focus")) {
-    focus.classList.toggle("visible", focus.dataset.patchId === state.activePatchId);
+    focus.classList.toggle("visible", state.mode === "refine"
+      ? state.refineSidebarMode === "view" && focus.dataset.patchId === state.activePatchId
+      : focus.dataset.patchId === state.activePatchId);
+  }
+
+  for (const focus of elements.chapterStack.querySelectorAll(".draft-focus")) {
+    focus.classList.toggle("visible", state.mode === "refine"
+      && state.refineSidebarMode === "create"
+      && focus.dataset.draftPatchId === draftPatchKey());
   }
 }
 
@@ -1101,6 +1696,18 @@ function clearInteractionState() {
     hoverIntentTimer = null;
   }
   hideHoverTooltip();
+  if (state.mode === "refine") {
+    state.draftBoundaryMode = false;
+    state.draftAnchorPickMode = false;
+    renderModePanels();
+    renderInteractionState();
+    return;
+  }
+
+  state.refineSidebarMode = "view";
+  state.draftPatch = null;
+  state.draftBoundaryMode = false;
+  state.draftAnchorPickMode = false;
   if (state.mode === "read") {
     renderEmptyPanels();
   } else {
@@ -1109,14 +1716,28 @@ function clearInteractionState() {
   renderInteractionState();
 }
 
+function clearReadSelection() {
+  if (state.mode !== "read") {
+    return;
+  }
+
+  clearInteractionState();
+}
+
 function renderChapterPanel() {
   const chapterOptions = state.chapterIndex.length > 0
     ? state.chapterIndex
       .map((chapter) => {
         const value = `${chapter.series}::${chapter.chapter}`;
-        const selected = chapter.series === currentModel()?.series && chapter.chapter === currentModel()?.chapter;
-        const label = chapter.hasReadModel ? chapter.title : `${chapter.title} (read unavailable)`;
-        return `<option value="${escapeHtml(value)}" ${selected ? "selected" : ""} ${chapter.hasReadModel ? "" : "disabled"}>${escapeHtml(label)}</option>`;
+        const selected = chapter.series === state.currentChapter?.series && chapter.chapter === state.currentChapter?.chapter;
+        const capabilityLabel = chapter.hasReadModel && chapter.hasRefineData
+          ? ""
+          : chapter.hasReadModel
+            ? " (read only)"
+            : chapter.hasRefineData
+              ? " (refine only)"
+              : " (unavailable)";
+        return `<option value="${escapeHtml(value)}" ${selected ? "selected" : ""} ${chapter.hasReadModel || chapter.hasRefineData ? "" : "disabled"}>${escapeHtml(`${chapter.title}${capabilityLabel}`)}</option>`;
       })
       .join("")
     : "";
@@ -1133,9 +1754,10 @@ function renderChapterPanel() {
   elements.chapterPanel.innerHTML = `
     <h2>Chapter</h2>
     ${pickerMarkup}
+    ${state.modeNotice ? `<p class="empty">${escapeHtml(state.modeNotice)}</p>` : ""}
     <p><span class="label">Title</span>${escapeHtml(chapterTitle())}</p>
-    <p><span class="label">Series</span>${escapeHtml(currentModel()?.series ?? "")}</p>
-    <p><span class="label">Chapter</span>${escapeHtml(currentModel()?.chapter ?? "")}</p>
+    <p><span class="label">Series</span>${escapeHtml(state.currentChapter?.series ?? "")}</p>
+    <p><span class="label">Chapter</span>${escapeHtml(state.currentChapter?.chapter ?? "")}</p>
     <p><span class="label">Mode</span>${escapeHtml(state.mode)}</p>
   `;
 
@@ -1146,7 +1768,12 @@ function renderChapterPanel() {
       if (!series || !chapter) {
         return;
       }
-      await loadChapterFromApi(series, chapter);
+      await loadChapterFromApi(series, chapter, {
+        preferredMode: state.mode,
+        activeSentenceKey: null,
+        activePatchId: null,
+        preservePosition: false,
+      });
     });
   }
 }
@@ -1188,7 +1815,23 @@ function buildSegmentFrame(segment) {
   patchFocus.className = "patch-focus";
   overlay.appendChild(patchFocus);
 
+  const draftFocus = document.createElement("div");
+  draftFocus.className = "draft-focus";
+  overlay.appendChild(draftFocus);
+
   const readInteractionsEnabled = state.mode === "read";
+  const draftInteractionsEnabled =
+    state.mode === "refine"
+    && state.refineSidebarMode === "create"
+    && state.draftBoundaryMode
+    && (!state.draftPatch?.segmentId || state.draftPatch.segmentId === segment.id);
+
+  if (draftInteractionsEnabled) {
+    frame.classList.add("draft-target");
+    canvas.addEventListener("click", (event) => {
+      addDraftBoundaryPoint(event, frame);
+    });
+  }
 
   for (const character of annotation.characters) {
     const currentWord = wordsById.get(character.wordId);
@@ -1239,7 +1882,7 @@ function buildSegmentFrame(segment) {
       });
     }
 
-    hotspot.addEventListener("click", () => {
+    hotspot.addEventListener("click", (event) => {
       const sentence = sentencesById.get(character.sentenceId);
       const nextSentenceKey = sentenceKey(segment.id, character.sentenceId);
       if (state.mode === "read") {
@@ -1253,6 +1896,29 @@ function buildSegmentFrame(segment) {
         updateWordPanel(currentWord);
         updateSentencePanel(sentence);
         renderInteractionState();
+        return;
+      }
+
+      if (state.mode === "refine") {
+        if (state.refineSidebarMode === "create") {
+          if (state.draftBoundaryMode) {
+            addDraftBoundaryPoint(event, frame);
+            return;
+          }
+
+          if (state.draftPatch && state.draftAnchorPickMode) {
+            const currentMode = state.draftPatch.anchorMode ?? "after";
+            updateDraftAnchor(currentMode, character.sentenceId);
+            state.draftAnchorPickMode = false;
+            renderModePanels();
+            renderInteractionState();
+          }
+          return;
+        }
+
+        if (state.refineSidebarMode === "view") {
+          focusSentence(nextSentenceKey, { scrollPage: true, scrollSidebar: true });
+        }
         return;
       }
 
@@ -1298,42 +1964,103 @@ function renderChapter() {
   queueViewportAnchorSync();
 }
 
-function setChapterModels(readModel, refineModel, { activeSentenceKey = null, activePatchId = null } = {}) {
+function setChapterModels(series, chapter, { readModel = null, refineModel = null, activeSentenceKey = null, activePatchId = null } = {}) {
+  state.currentChapter = { series, chapter };
   state.readModel = readModel;
   state.refineModel = refineModel;
-  state.readAnnotations = buildAnnotationMapFromChapterModel(readModel);
+  state.readAnnotations = readModel ? buildAnnotationMapFromChapterModel(readModel) : new Map();
   state.refineAnnotations = refineModel ? buildAnnotationMapFromChapterModel(refineModel, { includeDeleted: true }) : new Map();
   syncActiveAnnotations();
   state.hoveredWordKey = null;
+  state.refineSidebarMode = "view";
   state.activeSentenceKey = activeSentenceKey;
   state.activePatchId = activePatchId;
   state.visibleSentenceKeys = new Set();
   hideHoverTooltip();
 }
 
+async function ensureChapterModel(series, chapter, mode, { force = false } = {}) {
+  const cached = !force ? cachedModel(mode, series, chapter) : null;
+  if (cached) {
+    return cached;
+  }
+
+  const model = await loadJson(`/api/chapters/${series}/${chapter}/${mode}`);
+  if (model) {
+    cacheModel(mode, model);
+  }
+  return model;
+}
+
+function fallbackModeForChapter(chapter, requestedMode) {
+  if (modeAvailableForChapter(chapter, requestedMode)) {
+    return {
+      mode: requestedMode,
+      notice: "",
+    };
+  }
+
+  const alternateMode = requestedMode === "read" ? "refine" : "read";
+  if (modeAvailableForChapter(chapter, alternateMode)) {
+    return {
+      mode: alternateMode,
+      notice: `${requestedMode === "read" ? "Read" : "Refine"} data is unavailable for this chapter, so the app switched to ${alternateMode}.`,
+    };
+  }
+
+  return {
+    mode: requestedMode,
+    notice: `No persisted ${requestedMode} data is available for this chapter yet.`,
+  };
+}
+
 async function loadChapterFromApi(
   series,
   chapter,
   {
+    preferredMode = state.mode,
     activeSentenceKey = state.activeSentenceKey,
     activePatchId = state.activePatchId,
     preservePosition = true,
     restoreScrollTop = null,
+    forceModes = [],
+    positionAnchor = null,
   } = {},
 ) {
-  const previousAnchor = preservePosition ? state.positionAnchor ?? captureTopVisibleSentenceAnchor() : null;
-  const [readModel, refineModel] = await Promise.all([
-    loadJson(`/api/chapters/${series}/${chapter}/read`),
-    loadJson(`/api/chapters/${series}/${chapter}/refine`),
-  ]);
-  if (!readModel) {
-    throw new Error(`Could not load read data for ${series} / ${chapter}.`);
+  const chapterEntry = chapterEntryFor(series, chapter);
+  if (!chapterEntry) {
+    throw new Error(`Unknown chapter: ${series} / ${chapter}.`);
   }
 
-  setChapterModels(readModel, refineModel, { activeSentenceKey, activePatchId });
-  if (state.mode === "refine" && !state.refineModel) {
-    state.mode = "read";
+  const previousAnchor = preservePosition ? positionAnchor ?? state.positionAnchor ?? captureTopVisibleSentenceAnchor() : null;
+  const modeSelection = fallbackModeForChapter(chapterEntry, preferredMode);
+  const nextMode = modeSelection.mode;
+  const requiredModel = await ensureChapterModel(series, chapter, nextMode, {
+    force: forceModes.includes(nextMode),
+  });
+  if (!requiredModel) {
+    throw new Error(`Could not load ${nextMode} data for ${series} / ${chapter}.`);
   }
+
+  const nextReadModel = nextMode === "read"
+    ? requiredModel
+    : (forceModes.includes("read")
+      ? await ensureChapterModel(series, chapter, "read", { force: true })
+      : cachedModel("read", series, chapter));
+  const nextRefineModel = nextMode === "refine"
+    ? requiredModel
+    : (forceModes.includes("refine")
+      ? await ensureChapterModel(series, chapter, "refine", { force: true })
+      : cachedModel("refine", series, chapter));
+
+  state.mode = nextMode;
+  state.modeNotice = modeSelection.notice;
+  setChapterModels(series, chapter, {
+    readModel: nextReadModel,
+    refineModel: nextRefineModel,
+    activeSentenceKey,
+    activePatchId,
+  });
   updateChapterUrl(series, chapter, state.mode);
   renderModeControls();
   renderModePanels();
@@ -1363,7 +2090,7 @@ async function bootstrapChapterData() {
   const chapters = Array.isArray(chaptersPayload?.chapters) ? chaptersPayload.chapters : [];
   state.chapterIndex = chapters;
   if (chapters.length === 0) {
-    throw new Error("No chapters with persisted read models are currently available.");
+    throw new Error("No chapters with persisted read or refine data are currently available.");
   }
 
   const url = new URL(window.location.href);
@@ -1373,15 +2100,22 @@ async function bootstrapChapterData() {
   if (requestedMode === "refine" || requestedMode === "read") {
     state.mode = requestedMode;
   }
-  const selectedChapter = chapters.find(
-    (entry) => entry.series === requestedSeries && entry.chapter === requestedChapter && entry.hasReadModel,
-  ) ?? chapters.find((entry) => entry.hasReadModel) ?? null;
+  const preferredMode = requestedMode === "refine" ? "refine" : "read";
+  const selectedChapter = chapters.find((entry) => {
+    return entry.series === requestedSeries
+      && entry.chapter === requestedChapter
+      && (modeAvailableForChapter(entry, preferredMode) || modeAvailableForChapter(entry, preferredMode === "read" ? "refine" : "read"));
+  }) ?? chapters.find((entry) => modeAvailableForChapter(entry, preferredMode))
+    ?? chapters.find((entry) => modeAvailableForChapter(entry, preferredMode === "read" ? "refine" : "read"))
+    ?? null;
 
   if (!selectedChapter) {
-    throw new Error("No chapter with a persisted read model is currently available.");
+    throw new Error("No chapter with persisted read or refine data is currently available.");
   }
 
-  await loadChapterFromApi(selectedChapter.series, selectedChapter.chapter);
+  await loadChapterFromApi(selectedChapter.series, selectedChapter.chapter, {
+    preferredMode,
+  });
 }
 
 async function init() {
@@ -1410,25 +2144,108 @@ async function init() {
     const target = event.target instanceof Element ? event.target : null;
     const clickedHotspot = target?.closest(".hotspot");
     const clickedSidebar = target?.closest(".sidebar");
-    if (!clickedHotspot && !clickedSidebar) {
+    const clickedChapter = target?.closest("#chapterStack");
+    if (!clickedHotspot && !clickedSidebar && !clickedChapter) {
       clearInteractionState();
     }
+  });
+
+  elements.chapterStack.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(".hotspot")) {
+      return;
+    }
+
+    clearReadSelection();
   });
 
   window.addEventListener("scroll", queueViewportAnchorSync, { passive: true });
   window.addEventListener("resize", queueViewportAnchorSync);
 
   elements.readModeButton.addEventListener("click", () => {
-    setMode("read");
+    setMode("read").catch((error) => {
+      console.error(error);
+      window.alert(error.message);
+    });
   });
   elements.refineModeButton.addEventListener("click", () => {
-    setMode("refine");
+    setMode("refine").catch((error) => {
+      console.error(error);
+      window.alert(error.message);
+    });
   });
 
   elements.refinePanel.addEventListener("click", (event) => {
     const target = event.target instanceof Element ? event.target : null;
+    const refineActionButton = target?.closest("[data-refine-action]");
+    if (refineActionButton) {
+      const action = refineActionButton.getAttribute("data-refine-action");
+      if (!action) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "enter-create") {
+        enterRefineCreateMode({ ensureDraft: true });
+        return;
+      }
+      if (action === "enter-view") {
+        enterRefineViewMode({ preserveDraft: true });
+      }
+      return;
+    }
+
+    const draftActionButton = target?.closest("[data-draft-action]");
+    if (draftActionButton) {
+      const action = draftActionButton.getAttribute("data-draft-action");
+      if (!action) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (action === "cancel") {
+        cancelDraftPatch();
+        return;
+      }
+      if (action === "toggle-boundary") {
+        try {
+          toggleDraftBoundaryMode();
+        } catch (error) {
+          console.error(error);
+          window.alert(error.message);
+        }
+        return;
+      }
+      if (action === "undo-point") {
+        undoDraftBoundaryPoint();
+        return;
+      }
+      if (action === "clear-region") {
+        updateDraftPatch((draftPatch) => ({
+          ...draftPatch,
+          segmentId: null,
+          sourcePageId: null,
+          region: { polygon: [] },
+          text_flow: {
+            ...draftPatch.text_flow,
+            guide: [],
+          },
+        }));
+        return;
+      }
+      if (action === "process") {
+        processDraftPatch().catch((error) => {
+          console.error(error);
+          window.alert(error.message);
+        });
+      }
+      return;
+    }
+
     const patchActionButton = target?.closest(".refine-patch-action");
-    if (patchActionButton) {
+    if (patchActionButton && state.refineSidebarMode === "view") {
       const patchId = patchActionButton.getAttribute("data-patch-id");
       if (!patchId) {
         return;
@@ -1444,7 +2261,7 @@ async function init() {
     }
 
     const actionButton = target?.closest(".refine-sentence-action");
-    if (actionButton) {
+    if (actionButton && state.refineSidebarMode === "view") {
       const sentenceKey = actionButton.getAttribute("data-sentence-key");
       const action = actionButton.getAttribute("data-action");
       if (!sentenceKey || !action) {
@@ -1461,7 +2278,7 @@ async function init() {
     }
 
     const patchButton = target?.closest(".refine-patch-body");
-    if (patchButton) {
+    if (patchButton && state.refineSidebarMode === "view") {
       event.preventDefault();
       event.stopPropagation();
 
@@ -1475,7 +2292,7 @@ async function init() {
     }
 
     const sentenceButton = target?.closest(".refine-sentence-body");
-    if (!sentenceButton) {
+    if (!sentenceButton || state.refineSidebarMode !== "view") {
       return;
     }
 
@@ -1488,6 +2305,73 @@ async function init() {
     }
 
     focusSentence(sentenceKey, { scrollPage: true, scrollSidebar: true });
+  });
+
+  elements.refinePanel.addEventListener("input", (event) => {
+    const target = event.target instanceof HTMLTextAreaElement ? event.target : null;
+    if (!target || state.refineSidebarMode !== "create" || !state.draftPatch) {
+      return;
+    }
+
+    const field = target.getAttribute("data-draft-field");
+    if (field === "user-transcript") {
+      updateDraftPatch((draftPatch) => ({
+        ...draftPatch,
+        user_transcript: target.value,
+      }), { rerenderPanel: false, rerenderInteraction: false });
+      return;
+    }
+    if (field === "notes") {
+      updateDraftPatch((draftPatch) => ({
+        ...draftPatch,
+        notes: target.value,
+      }), { rerenderPanel: false, rerenderInteraction: false });
+    }
+  });
+
+  elements.refinePanel.addEventListener("change", (event) => {
+    const target = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (!target || state.refineSidebarMode !== "create" || !state.draftPatch) {
+      return;
+    }
+
+    const field = target.getAttribute("data-draft-field");
+    if (field === "text-flow-mode") {
+      updateDraftPatch((draftPatch) => ({
+        ...draftPatch,
+        text_flow: {
+          ...draftPatch.text_flow,
+          mode: target.value,
+          guide: autoGuideForPolygon(draftPatch.region?.polygon ?? [], target.value),
+        },
+      }));
+      return;
+    }
+
+    if (field === "anchor-mode") {
+      const currentSentenceId = state.draftPatch.anchor?.insert_before_sentence_id
+        ?? state.draftPatch.anchor?.insert_after_sentence_id
+        ?? "";
+      if (target.value === "append") {
+        state.draftAnchorPickMode = false;
+      }
+      updateDraftAnchor(target.value, currentSentenceId);
+      return;
+    }
+
+    if (field === "anchor-sentence") {
+      if (target.value === "__pick_from_page__") {
+        state.draftAnchorPickMode = true;
+        state.draftBoundaryMode = false;
+        renderModePanels();
+        renderInteractionState();
+        return;
+      }
+
+      state.draftAnchorPickMode = false;
+      const currentMode = state.draftPatch.anchorMode ?? "append";
+      updateDraftAnchor(currentMode, target.value);
+    }
   });
 
   renderEmptyPanels();

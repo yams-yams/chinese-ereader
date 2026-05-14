@@ -242,6 +242,8 @@ Current issues:
 Current endpoints:
 
 - `POST /api/delete-sentence`
+- `POST /api/restore-sentence`
+- `POST /api/delete-patch`
 - `POST /api/process-patch`
 
 Current issues:

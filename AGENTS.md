@@ -12,6 +12,7 @@ These rules are mandatory. Do not treat them as preferences.
 4. Do not create a feature branch from another local branch unless the user explicitly approves a stacked branch.
 5. If a task appears to depend on work that is not yet on `main`, stop and ask before branching from a non-`main` base.
 6. Do not hide branch-base exceptions. State them clearly before taking the action.
+7. Don't use Playwright MCP for UI testing unless prompted to do so.
 
 ## GitHub Sync Rules
 

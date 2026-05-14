@@ -73,6 +73,13 @@ def load_json_file(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_chapter_model(series: str, chapter: str, model_name: str) -> Optional[dict]:
+    model_path = chapter_model_path(series, chapter, model_name)
+    if model_path is None or not model_path.is_file():
+        return None
+    return load_json_file(model_path)
+
+
 def chapter_title(series: str, chapter: str, manifest: dict) -> str:
     return str(manifest.get("title") or f"{series} / {chapter}")
 
@@ -116,6 +123,25 @@ def annotation_location(annotation_path: Path) -> tuple[str, str, str] | None:
 
     series, chapter, filename = relative.parts
     return series, chapter, Path(filename).stem
+
+
+def resolve_annotation_path_from_segment(series: str, chapter: str, segment_id: str) -> Optional[Path]:
+    refine_model = load_chapter_model(series, chapter, "refine-model")
+    if not refine_model:
+        return None
+
+    segment = next(
+        (item for item in refine_model.get("segments", []) if str(item.get("id", "")).strip() == segment_id),
+        None,
+    )
+    if segment is None:
+        return None
+
+    source_page_id = str(segment.get("sourcePageId", "")).strip()
+    if not source_page_id:
+        return None
+
+    return resolve_repo_path(ANNOTATIONS_ROOT, series, chapter, f"{source_page_id}.json")
 
 
 def resolve_page_image_path(relative_path: str) -> Optional[Path]:
@@ -588,17 +614,34 @@ class ReaderHandler(SimpleHTTPRequestHandler):
         json_response(self, HTTPStatus.OK, payload)
 
     def handle_set_sentence_status(self, payload: dict, status: str) -> None:
-        annotation_path = resolve_annotation_path(str(payload.get("annotationPath", "")))
+        series = str(payload.get("series", "")).strip()
+        chapter = str(payload.get("chapter", "")).strip()
+        segment_id = str(payload.get("segmentId", "")).strip()
         sentence_id = str(payload.get("sentenceId", "")).strip()
+        annotation_path = None
+        if series and chapter and segment_id:
+            annotation_path = resolve_annotation_path_from_segment(series, chapter, segment_id)
+        elif str(payload.get("annotationPath", "")).strip():
+            annotation_path = resolve_annotation_path(str(payload.get("annotationPath", "")))
+
         if annotation_path is None or not sentence_id:
-            self.send_error(HTTPStatus.BAD_REQUEST, "annotationPath and sentenceId are required")
+            self.send_error(
+                HTTPStatus.BAD_REQUEST,
+                "series, chapter, segmentId, and sentenceId are required",
+            )
             return
 
         location = annotation_location(annotation_path)
         if location is None:
-            self.send_error(HTTPStatus.BAD_REQUEST, "annotationPath must resolve under processed annotations")
+            self.send_error(HTTPStatus.BAD_REQUEST, "Resolved annotation path must stay under processed annotations")
             return
-        series, chapter, _page_id = location
+        resolved_series, resolved_chapter, _page_id = location
+        if series and chapter and (series != resolved_series or chapter != resolved_chapter):
+            self.send_error(HTTPStatus.BAD_REQUEST, "series/chapter did not match the resolved annotation path")
+            return
+
+        series = resolved_series
+        chapter = resolved_chapter
 
         annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
         updated_annotation, found = set_sentence_status(annotation, sentence_id, status)
@@ -615,6 +658,9 @@ class ReaderHandler(SimpleHTTPRequestHandler):
             HTTPStatus.OK,
             {
                 "ok": True,
+                "series": series,
+                "chapter": chapter,
+                "segmentId": segment_id or None,
                 "sentenceId": sentence_id,
                 "status": status,
                 "annotation": updated_annotation,

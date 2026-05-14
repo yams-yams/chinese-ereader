@@ -242,6 +242,27 @@ p {
   border: 1px solid rgba(31, 27, 24, 0.08);
 }
 
+.refine-workspace {
+  display: grid;
+  gap: 14px;
+}
+
+.refine-workspace-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.refine-workspace-header h3 {
+  margin: 0;
+}
+
+.refine-workspace-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .refine-section {
   margin-top: 12px;
   padding-top: 12px;
@@ -475,6 +496,55 @@ p {
   background: rgba(255, 251, 245, 0.96);
 }
 
+.refine-draft-detail textarea {
+  width: 100%;
+  min-height: 0;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--ink);
+  font: inherit;
+}
+
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.draft-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(31, 27, 24, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.draft-button:hover,
+.draft-button:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(184, 67, 47, 0.26);
+  background: rgba(255, 251, 245, 0.96);
+}
+
+.draft-button.primary {
+  border-color: rgba(184, 67, 47, 0.28);
+  background: rgba(184, 67, 47, 0.12);
+  color: #8c2f20;
+}
+
 .field {
   display: grid;
   gap: 6px;
@@ -581,7 +651,8 @@ p {
 
 .word-focus,
 .sentence-focus,
-.patch-focus {
+.patch-focus,
+.draft-focus {
   position: absolute;
   border-radius: 14px;
   opacity: 0;
@@ -606,9 +677,28 @@ p {
   box-shadow: 0 0 0 9999px rgba(24, 20, 17, 0.22);
 }
 
+.draft-focus {
+  border: 2px dashed rgba(15, 122, 54, 0.92);
+  background: rgba(20, 184, 87, 0.14);
+  box-shadow: 0 0 0 9999px rgba(24, 20, 17, 0.18);
+}
+
+.draft-point {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: rgba(15, 122, 54, 0.96);
+  box-shadow: 0 0 0 2px rgba(255, 251, 245, 0.9);
+  pointer-events: none;
+}
+
 .word-focus.visible,
 .sentence-focus.visible,
-.patch-focus.visible {
+.patch-focus.visible,
+.draft-focus.visible {
   opacity: 1;
 }
 
@@ -623,6 +713,10 @@ p {
 
 .hotspot:disabled {
   cursor: default;
+}
+
+.draft-target .page-canvas {
+  cursor: crosshair;
 }
 
 .hover-tooltip {

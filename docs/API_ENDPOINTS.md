@@ -128,7 +128,9 @@ Request:
 
 ```json
 {
-  "annotationPath": "data/processed/annotations/renjian-bailijin/chapter-001/page-006.json",
+  "series": "renjian-bailijin",
+  "chapter": "chapter-001",
+  "segmentId": "segment-006",
   "sentenceId": "sentence-0015"
 }
 ```
@@ -146,7 +148,7 @@ Response:
 
 Notes:
 
-- the source annotation file is updated in place
+- the server resolves the source annotation file from the chapter refine model
 - the server rebuilds chapter artifacts after the mutation, so `read-model.json` and `refine-model.json` stay current
 
 ## `POST /api/restore-sentence`
@@ -159,7 +161,9 @@ Request:
 
 ```json
 {
-  "annotationPath": "data/processed/annotations/renjian-bailijin/chapter-001/page-006.json",
+  "series": "renjian-bailijin",
+  "chapter": "chapter-001",
+  "segmentId": "segment-006",
   "sentenceId": "sentence-0015"
 }
 ```
@@ -178,6 +182,38 @@ Response:
 Notes:
 
 - like delete, this rebuilds the persisted chapter models after the mutation
+- for compatibility during migration, the server still accepts the older `annotationPath` payload shape
+
+## `POST /api/delete-patch`
+
+Purpose:
+
+- delete one saved patch and remove its applied patch entities from the source annotation file
+
+Request:
+
+```json
+{
+  "series": "renjian-bailijin",
+  "chapter": "chapter-001",
+  "patchId": "patch-0001"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "patchId": "patch-0001"
+}
+```
+
+Notes:
+
+- the server removes the patch from `data/review/<series>/<chapter>/patches.json`
+- if that patch has already been applied into annotation JSON, the server removes the derived patch entities
+- the server rebuilds `read-model.json` and `refine-model.json` after the mutation so the chapter contracts stay current
 
 ## `POST /api/process-patch`
 
@@ -220,5 +256,11 @@ Notes:
 The current reader now prefers:
 
 1. `GET /api/chapters`
-2. `GET /api/chapters/:series/:chapter/read`
-3. `GET /api/chapters/:series/:chapter/refine`
+2. `GET /api/chapters/:series/:chapter/:mode` for the active mode
+3. in-memory reuse of any already-loaded `read` or `refine` model for the current chapter
+
+Current refine mutations used by the UI:
+
+- `POST /api/delete-sentence`
+- `POST /api/restore-sentence`
+- `POST /api/delete-patch`

@@ -100,6 +100,10 @@ Current endpoints:
 
 - `POST /api/delete-sentence`
   - Deletes a sentence from an annotation file on disk
+- `POST /api/restore-sentence`
+  - Restores a soft-deleted sentence in an annotation file on disk
+- `POST /api/delete-patch`
+  - Deletes one saved patch sidecar entry and removes any applied patch entities from annotation JSON
 - `POST /api/process-patch`
   - Runs the focused OCR patch pipeline
   - updates review sidecar data
